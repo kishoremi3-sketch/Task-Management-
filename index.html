@@ -93,8 +93,12 @@
           <p class="burndown-sub" id="burndown-sub"></p>
         </div>
         <span class="burndown-status" id="burndown-status"></span>
+        <div class="unit-toggle" id="unit-toggle" role="group" aria-label="Measure the burndown in">
+          <button type="button" data-unit="points">Points</button>
+          <button type="button" data-unit="tasks">Tasks</button>
+        </div>
         <div class="burndown-legend" aria-hidden="true">
-          <span><i class="key key-remaining"></i>Open tasks</span>
+          <span><i class="key key-remaining"></i><span id="legend-remaining">Open tasks</span></span>
           <span><i class="key key-ideal"></i>Ideal</span>
         </div>
         <button class="btn btn-ghost" id="burndown-toggle" aria-expanded="true" aria-controls="burndown-body">Hide</button>
@@ -213,6 +217,10 @@
           </div>
         </fieldset>
       </div>
+      <fieldset class="field points-field">
+        <legend>Story points</legend>
+        <div class="points-options" id="points-options"></div>
+      </fieldset>
       <label class="field">
         <span>Tags <small>(comma separated)</small></span>
         <input name="tags" autocomplete="off" placeholder="e.g. frontend, q4">
@@ -260,6 +268,11 @@
           <input type="date" id="sprint-end" required>
         </label>
       </div>
+      <label class="field">
+        <span>Point limit <small>(optional)</small></span>
+        <input type="number" id="sprint-capacity" min="0" max="999" step="0.5" inputmode="decimal" placeholder="No limit">
+        <small class="field-hint" id="sprint-velocity"></small>
+      </label>
       <label class="field">
         <span>Goal <small>(optional)</small></span>
         <textarea id="sprint-goal" rows="2" maxlength="300" placeholder="What should this sprint achieve?"></textarea>

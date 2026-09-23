@@ -9,6 +9,21 @@ export const PRIORITIES = ['low', 'medium', 'high', 'urgent'];
 export const TASK_TYPES = ['project', 'enhancement', 'defect'];
 export const TASK_TYPE_LABELS = { project: 'Project', enhancement: 'Enhancement', defect: 'Defect' };
 
+// Suggested story point values (a task can hold any value 0–999).
+export const POINT_SCALE = [1, 2, 3, 5, 8, 13, 21];
+
+// A story point estimate or null for "not estimated". Halves are allowed.
+export function cleanPoints(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) return null;
+  return Math.min(999, Math.round(n * 2) / 2);
+}
+
+export function sumPoints(tasks) {
+  return tasks.reduce((total, t) => total + (t.points ?? 0), 0);
+}
+
 export const DEFAULT_COLUMNS = [
   { id: 'backlog', title: 'Backlog', wipLimit: 0 },
   { id: 'todo', title: 'To Do', wipLimit: 0 },
@@ -56,9 +71,10 @@ export function createSampleState(today = todayISO()) {
     ['review', 'API rate limiting', 'Token bucket, 100 req/min per key.', 'high', 1, ['backend'], 'Alex', 'enhancement'],
     ['done', 'Create project repository', '', 'low', -3, ['devops'], 'Sam', 'project'],
   ];
-  for (const [status, title, description, priority, dueOffset, tags, assignee, type] of samples) {
+  const samplePoints = [3, 5, 2, 3, 8, 5, 5, 1];
+  for (const [i, [status, title, description, priority, dueOffset, tags, assignee, type]] of samples.entries()) {
     state = addTask(state, {
-      status, title, description, priority, tags, assignee, type,
+      status, title, description, priority, tags, assignee, type, points: samplePoints[i],
       dueDate: addDays(today, dueOffset),
     });
   }
@@ -128,6 +144,8 @@ function normalizeSprint(sp) {
     startDate,
     endDate,
     status: SPRINT_STATUSES.includes(sp.status) ? sp.status : 'planned',
+    // Story point limit for the sprint; null means no limit.
+    capacity: cleanPoints(sp.capacity) || null,
     completedAt: sp.completedAt || null,
     // The local day it was completed, for the burndown.
     completedOn: ISO_DATE.test(sp.completedOn ?? '') ? sp.completedOn
@@ -144,7 +162,12 @@ function normalizeBurndown(input) {
   for (const [day, v] of Object.entries(input).sort().slice(-400)) {
     const remaining = count(v?.remaining);
     const total = count(v?.total);
-    if (ISO_DATE.test(day) && remaining !== null && total !== null) out[day] = { remaining, total };
+    if (!ISO_DATE.test(day) || remaining === null || total === null) continue;
+    out[day] = { remaining, total };
+    // Point counts were added later; older snapshots don't have them.
+    const remainingPoints = cleanPoints(v.remainingPoints);
+    const totalPoints = cleanPoints(v.totalPoints);
+    if (remainingPoints !== null && totalPoints !== null) Object.assign(out[day], { remainingPoints, totalPoints });
   }
   return out;
 }
@@ -164,6 +187,7 @@ function normalizeTask(t, status) {
     priority: PRIORITIES.includes(t.priority) ? t.priority : 'medium',
     type: TASK_TYPES.includes(t.type) ? t.type : '',
     sprintId: String(t.sprintId ?? ''),
+    points: cleanPoints(t.points),
     dueDate: /^\d{4}-\d{2}-\d{2}$/.test(t.dueDate ?? '') ? t.dueDate : '',
     tags: normalizeTags(t.tags),
     // assigneeId is a person's account id (hosted on claude.ai); assignee
@@ -360,7 +384,31 @@ export function startSprint(state, id, today = todayISO()) {
 
 export function sprintCounts(state, sprintId) {
   const tasks = tasksInView(state, sprintId);
-  return { total: tasks.length, remaining: tasks.filter((t) => t.status !== DONE_COLUMN_ID).length };
+  const open = tasks.filter((t) => t.status !== DONE_COLUMN_ID);
+  return {
+    total: tasks.length,
+    remaining: open.length,
+    totalPoints: sumPoints(tasks),
+    remainingPoints: sumPoints(open),
+  };
+}
+
+// Points planned vs the sprint's limit. over > 0 when above the limit.
+export function sprintLoad(state, sprintId) {
+  const sprint = getSprint(state, sprintId);
+  const planned = sumPoints(tasksInView(state, sprintId));
+  const capacity = sprint?.capacity ?? null;
+  return { planned, capacity, over: capacity ? Math.max(0, planned - capacity) : 0 };
+}
+
+// Average story points finished in the last few completed sprints.
+export function velocity(state, last = 3) {
+  const done = sprintsOf(state)
+    .filter((sp) => sp.status === 'completed')
+    .sort((a, b) => (a.completedOn ?? '').localeCompare(b.completedOn ?? ''))
+    .slice(-last)
+    .map((sp) => sumPoints(tasksInView(state, sp.id).filter((t) => t.status === DONE_COLUMN_ID)));
+  return done.length ? { average: Math.round((done.reduce((a, b) => a + b, 0) / done.length) * 2) / 2, sprints: done.length } : null;
 }
 
 function withSnapshot(state, sprintId, day) {
@@ -368,7 +416,7 @@ function withSnapshot(state, sprintId, day) {
   if (!sprint) return state;
   const counts = sprintCounts(state, sprintId);
   const prev = sprint.burndown?.[day];
-  if (prev && prev.remaining === counts.remaining && prev.total === counts.total) return state;
+  if (prev && ['remaining', 'total', 'remainingPoints', 'totalPoints'].every((k) => prev[k] === counts[k])) return state;
   return {
     ...state,
     sprints: sprintsOf(state).map((sp) => (sp.id === sprintId
@@ -388,7 +436,8 @@ export function recordBurndown(state, today = todayISO()) {
 
 // Chart data for a sprint's burndown, one point per day from the start
 // date to the end date (or to today / completion, if later):
-//   { date, remaining, total, ideal, estimated }
+//   { date, remaining, total, ideal, estimated,
+//     remainingPoints, totalPoints, idealPoints, pointsEstimated }
 // remaining/total are null for days that haven't happened yet. Days with
 // no snapshot carry the last snapshot forward; days before the first
 // snapshot are estimated from when the sprint's tasks were completed.
@@ -404,9 +453,15 @@ export function burndownSeries(state, sprintId, today = todayISO()) {
   const plannedDays = Math.max(1, daysLeft(sprint, sprint.startDate));
   const doneBy = (t, day) => t.status === DONE_COLUMN_ID && t.completedAt && todayISO(new Date(t.completedAt)) <= day;
 
+  const estimate = (day) => {
+    const open = tasks.filter((t) => !doneBy(t, day));
+    return { total: tasks.length, remaining: open.length, totalPoints: sumPoints(tasks), remainingPoints: sumPoints(open) };
+  };
+
   const points = [];
   let carried = null;
   let startTotal = null;
+  let startPoints = null;
   for (let day = sprint.startDate, i = 0; day <= lastDay; day = addDays(day, 1), i++) {
     let counts = null;
     let estimated = false;
@@ -419,18 +474,32 @@ export function burndownSeries(state, sprintId, today = todayISO()) {
       } else if (carried) {
         counts = carried;
       } else {
-        counts = { total: tasks.length, remaining: tasks.filter((t) => !doneBy(t, day)).length };
+        counts = estimate(day);
         estimated = true;
       }
     }
-    if (i === 0) startTotal = counts?.total ?? tasks.length;
-    const ideal = i >= plannedDays - 1 ? 0 : startTotal * (1 - i / (plannedDays - 1));
+    // Snapshots from before points were tracked: estimate the points.
+    let pointsEstimated = estimated;
+    let pointCounts = counts;
+    if (counts && counts.remainingPoints === undefined) {
+      pointCounts = estimate(day);
+      pointsEstimated = true;
+    }
+    if (i === 0) {
+      startTotal = counts?.total ?? tasks.length;
+      startPoints = pointCounts?.totalPoints ?? sumPoints(tasks);
+    }
+    const share = i >= plannedDays - 1 ? 0 : 1 - i / (plannedDays - 1);
     points.push({
       date: day,
       remaining: counts?.remaining ?? null,
       total: counts?.total ?? null,
-      ideal: Math.round(ideal * 10) / 10,
+      ideal: Math.round(startTotal * share * 10) / 10,
       estimated,
+      remainingPoints: pointCounts?.remainingPoints ?? null,
+      totalPoints: pointCounts?.totalPoints ?? null,
+      idealPoints: Math.round(startPoints * share * 10) / 10,
+      pointsEstimated,
     });
   }
   return points;

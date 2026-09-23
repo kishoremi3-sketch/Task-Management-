@@ -412,6 +412,58 @@ body:not([data-view="signin"]) .signin { display: none; }
 .plan-count { color: var(--muted); font-size: 13px; }
 .plan-empty { color: var(--muted); font-size: 13px; margin: 0; }
 
+/* ---------- story points ---------- */
+
+.points-badge {
+  padding: 0 6px;
+  border-radius: 99px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.points-field { margin: 0; padding: 0; border: none; }
+.points-field legend { padding: 0; margin-bottom: 4px; font-size: 12px; font-weight: 600; color: var(--muted); }
+.points-options { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.points-options label {
+  display: inline-grid;
+  place-items: center;
+  min-width: 38px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.points-options input { position: absolute; opacity: 0; pointer-events: none; }
+.points-options label:has(input:checked) { border-color: var(--primary); background: color-mix(in srgb, var(--primary) 14%, var(--surface)); color: var(--primary); }
+.points-options label:has(input:focus-visible) { outline: 2px solid var(--primary); outline-offset: 2px; }
+.points-options .none { font-weight: 500; color: var(--muted); }
+
+.field-hint { color: var(--muted); font-size: 12px; }
+.field-hint:empty { display: none; }
+
+.sprint-load { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; color: var(--text); }
+.sprint-load .meter { width: 70px; height: 8px; border-radius: 99px; background: var(--surface-2); overflow: hidden; }
+.sprint-load .meter i { display: block; height: 100%; border-radius: inherit; background: var(--primary); }
+.sprint-load.is-over { color: var(--danger); }
+.sprint-load.is-over .meter i { background: var(--danger); }
+
+.plan-row { grid-template-columns: 18px auto minmax(0, 1fr) auto 44px; }
+.plan-points { text-align: right; color: var(--muted); font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.plan-count.is-over { color: var(--danger); font-weight: 600; }
+
+.unit-toggle { display: inline-flex; padding: 2px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); }
+.unit-toggle button { padding: 3px 10px; border: none; border-radius: 6px; background: none; color: var(--muted); font-size: 12px; font-weight: 600; }
+.unit-toggle button[aria-pressed="true"] { background: var(--surface); color: var(--text); box-shadow: var(--shadow); }
+
 /* ---------- burndown ---------- */
 
 .burndown {

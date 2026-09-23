@@ -285,7 +285,9 @@ test('burndown: snapshots, carry-forward, estimates, ideal line and completion',
   const sid = s.sprints[0].id;
   s = setSprintTasks(s, sid, s.tasks.map((t) => t.id));
   s = startSprint(s, sid, '2026-09-21');
-  assert.deepEqual(s.sprints[0].burndown, { '2026-09-21': { remaining: 4, total: 4 } }, 'snapshot on start');
+  assert.deepEqual(s.sprints[0].burndown, {
+    '2026-09-21': { remaining: 4, total: 4, remainingPoints: 0, totalPoints: 0 },
+  }, 'snapshot on start');
 
   // Day 2: one task done. Day 3: no activity. Day 4 (today): a task added.
   const id = (title) => s.tasks.find((t) => t.title === title).id;
@@ -320,4 +322,45 @@ test('burndown estimates days before any snapshot from completion dates', async 
   });
   const pts = burndownSeries(s, 's1', '2026-09-03');
   assert.deepEqual(pts.map((p) => [p.remaining, p.estimated]), [[2, true], [1, true], [1, false]], 'today is live, earlier days estimated');
+});
+
+test('story points: cleaned, summed, and limited per sprint', async () => {
+  const { cleanPoints, sumPoints, addSprint, setSprintTasks, sprintLoad, velocity, completeSprint, startSprint } = await import('../js/store.js');
+  assert.equal(cleanPoints('5'), 5);
+  assert.equal(cleanPoints(2.26), 2.5);
+  assert.equal(cleanPoints(-1), null);
+  assert.equal(cleanPoints(''), null);
+  assert.equal(cleanPoints(5000), 999);
+
+  let s = board(['todo', 'A', { points: 5 }], ['todo', 'B', { points: 8 }], ['todo', 'C'], ['done', 'D', { points: 3 }]);
+  assert.equal(s.tasks.find((t) => t.title === 'C').points, null);
+  assert.equal(sumPoints(s.tasks), 16);
+
+  s = addSprint(s, { name: 'Sprint 1', startDate: '2026-09-01', endDate: '2026-09-14', capacity: 10 });
+  const sid = s.sprints[0].id;
+  s = setSprintTasks(s, sid, s.tasks.map((t) => t.id));
+  assert.deepEqual(sprintLoad(s, sid), { planned: 16, capacity: 10, over: 6 });
+  s = addSprint(s, { name: 'Sprint 2', startDate: '2026-09-15', endDate: '2026-09-28' });
+  assert.deepEqual(sprintLoad(s, s.sprints[1].id), { planned: 0, capacity: null, over: 0 });
+
+  assert.equal(velocity(s), null, 'no completed sprints yet');
+  s = completeSprint(startSprint(s, sid, '2026-09-01'), sid, '', '2026-09-14');
+  assert.deepEqual(velocity(s), { average: 3, sprints: 1 }, 'only finished points count');
+});
+
+test('burndown carries points and estimates them for older snapshots', async () => {
+  const { burndownSeries } = await import('../js/store.js');
+  const s = normalizeState({
+    sprints: [{
+      id: 's1', name: 'S', startDate: '2026-09-01', endDate: '2026-09-03', status: 'active',
+      burndown: { '2026-09-01': { remaining: 2, total: 2 } },
+    }],
+    tasks: [
+      { title: 'A', status: 'done', sprintId: 's1', points: 5, completedAt: new Date('2026-09-02T12:00:00').toISOString() },
+      { title: 'B', status: 'todo', sprintId: 's1', points: 3 },
+    ],
+  });
+  const pts = burndownSeries(s, 's1', '2026-09-03');
+  assert.deepEqual(pts.map((p) => [p.remainingPoints, p.pointsEstimated]), [[8, true], [3, true], [3, false]]);
+  assert.deepEqual(pts.map((p) => p.idealPoints), [8, 4, 0]);
 });

@@ -1,10 +1,11 @@
 import {
-  PRIORITIES, DONE_COLUMN_ID, TASK_TYPES, TASK_TYPE_LABELS,
+  PRIORITIES, DONE_COLUMN_ID, TASK_TYPES, TASK_TYPE_LABELS, POINT_SCALE, cleanPoints, sumPoints,
   createEmptyState, createSampleState, normalizeState, normalizeTags,
   tasksInColumn, getTask, isOverdue, isDueSoon, allTags, matchesFilter, getStats,
   assigneeKey, allAssigneeKeys, workload,
   sprintsOf, getSprint, activeSprint, nextSprintDefaults, addSprint, updateSprint, startSprint,
   completeSprint, deleteSprint, setSprintTasks, tasksInView, daysLeft, recordBurndown, burndownSeries,
+  sprintLoad, velocity,
   addTask, updateTask, deleteTask, moveTask, addColumn, updateColumn, deleteColumn, isOverWip,
   todayISO,
 } from './store.js';
@@ -551,6 +552,19 @@ function defaultSprintForNewTask() {
 
 const STATUS_LABEL = { planned: 'Planned', active: 'Active', completed: 'Completed' };
 
+const pts = (n) => `${Number.isInteger(n) ? n : n.toFixed(1)} pt${n === 1 ? '' : 's'}`;
+
+// After a change that added points to a sprint, warn if it's now over its limit.
+function warnIfOverLimit(before, sprintId) {
+  const sprint = getSprint(state, sprintId);
+  if (!sprint?.capacity) return;
+  const was = sprintLoad(before, sprintId);
+  const now = sprintLoad(state, sprintId);
+  if (now.over > 0 && now.planned > was.planned) {
+    toast(`⚠ ${sprint.name} is ${pts(now.over)} over its ${pts(sprint.capacity)} limit (${pts(now.planned)} planned)`);
+  }
+}
+
 function formatDay(iso) {
   if (!iso) return '';
   const [y, m, d] = iso.split('-').map(Number);
@@ -605,6 +619,7 @@ function renderSprintBar() {
         h('span', { class: 'progress', role: 'progressbar', 'aria-label': 'Sprint progress', 'aria-valuenow': pct, 'aria-valuemin': 0, 'aria-valuemax': 100 },
           h('span', { class: 'progress-fill', style: `width:${pct}%` })),
         `${finished} of ${tasks.length} done`),
+      renderSprintLoad(sprint),
       sprint.goal ? h('span', { class: 'sprint-goal' }, `Goal: ${sprint.goal}`) : null);
     const other = activeSprint(state);
     if (sprint.status !== 'completed') actions.push(h('button', { class: 'btn', onclick: () => openPlanDialog(sprint) }, 'Plan sprint'));
@@ -634,6 +649,31 @@ function renderSprintBar() {
   $('#sprint-actions').replaceChildren(...actions);
 }
 
+// Story points planned against the sprint's limit.
+function renderSprintLoad(sprint) {
+  const load = sprintLoad(state, sprint.id);
+  if (sprint.status === 'completed') {
+    const done = sumPoints(tasksInView(state, sprint.id).filter((t) => t.status === DONE_COLUMN_ID));
+    return load.planned || done ? h('span', { class: 'sprint-load' }, `${pts(done)} finished`) : null;
+  }
+  if (!load.capacity) {
+    return h('span', { class: 'sprint-load', title: 'No point limit set. Use Edit to add one.' }, `${pts(load.planned)} planned`);
+  }
+  const pct = Math.min(100, Math.round((load.planned / load.capacity) * 100));
+  const label = load.over
+    ? `⚠ ${load.planned} / ${pts(load.capacity)}: ${pts(load.over)} over limit`
+    : `${load.planned} / ${pts(load.capacity)}`;
+  return h('span', {
+    class: `sprint-load${load.over ? ' is-over' : ''}`,
+    title: `${pts(load.planned)} planned against a limit of ${pts(load.capacity)}`,
+  },
+  h('span', {
+    class: 'meter', role: 'meter', 'aria-label': 'Points planned against the limit',
+    'aria-valuenow': load.planned, 'aria-valuemin': 0, 'aria-valuemax': load.capacity,
+  }, h('i', { style: `width:${pct}%` })),
+  label);
+}
+
 $('#sprint-view').addEventListener('change', (e) => chooseSprintView(e.target.value));
 
 // Close buttons and backdrop clicks for the sprint dialogs.
@@ -654,6 +694,13 @@ function openSprintDialog(sprint) {
   $('#sprint-start').value = values.startDate;
   $('#sprint-end').value = values.endDate;
   $('#sprint-goal').value = values.goal ?? '';
+  // New sprints start with the last sprint's limit, if there was one.
+  const lastLimit = [...sprintsOf(state)].reverse().find((sp) => sp.capacity)?.capacity ?? '';
+  $('#sprint-capacity').value = sprint ? (sprint.capacity ?? '') : lastLimit;
+  const v = velocity(state);
+  $('#sprint-velocity').textContent = v
+    ? `The last ${v.sprints === 1 ? 'sprint' : `${v.sprints} sprints`} finished ${pts(v.average)}${v.sprints === 1 ? '' : ' on average'}.`
+    : 'Tip: set this to the points your team usually finishes in a sprint.';
   $('#sprint-delete').hidden = !sprint;
   $('#sprint-error').hidden = true;
   $('#sprint-dialog').showModal();
@@ -667,7 +714,13 @@ $('#sprint-form').addEventListener('submit', (e) => {
     startDate: $('#sprint-start').value,
     endDate: $('#sprint-end').value,
     goal: $('#sprint-goal').value.trim(),
+    capacity: cleanPoints($('#sprint-capacity').value),
   };
+  if ($('#sprint-capacity').value.trim() && fields.capacity === null) {
+    $('#sprint-error').textContent = 'The point limit must be a number of 0 or more.';
+    $('#sprint-error').hidden = false;
+    return;
+  }
   if (fields.endDate < fields.startDate) {
     $('#sprint-error').textContent = 'The end date must be on or after the start date.';
     $('#sprint-error').hidden = false;
@@ -718,7 +771,9 @@ function openPlanDialog(sprint) {
         h('input', { type: 'checkbox', value: task.id, checked, onchange: updatePlanCount }),
         task.type ? h('span', { class: `type-badge type-${task.type}` }, TASK_TYPE_LABELS[task.type]) : h('span'),
         h('span', { class: 'plan-title' }, task.title),
-        h('span', { class: 'plan-meta' }, [columnName(task.status), key ? shortName(personFor(key).name) : null].filter(Boolean).join(' · '))));
+        h('span', { class: 'plan-meta' }, [columnName(task.status), key ? shortName(personFor(key).name) : null].filter(Boolean).join(' · ')),
+        h('span', { class: 'plan-points', title: task.points === null ? 'Not estimated' : pts(task.points) },
+          task.points === null ? '–' : task.points)));
   };
   const inSprint = state.tasks.filter((t) => t.sprintId === sprint.id);
   const backlog = state.tasks.filter((t) => !t.sprintId && t.status !== DONE_COLUMN_ID);
@@ -740,9 +795,21 @@ function openPlanDialog(sprint) {
   $('#plan-search').focus();
 }
 
+function plannedSelection() {
+  const ids = [...$('#plan-list').querySelectorAll('input:checked')].map((i) => i.value);
+  const total = sumPoints(ids.map((id) => getTask(state, id)).filter(Boolean));
+  const capacity = getSprint(state, planningSprintId)?.capacity ?? null;
+  return { ids, total, capacity, over: capacity ? Math.max(0, total - capacity) : 0 };
+}
+
 function updatePlanCount() {
-  const n = $('#plan-list').querySelectorAll('input:checked').length;
-  $('#plan-count').textContent = `${n} task${n === 1 ? '' : 's'} in this sprint`;
+  const { ids, total, capacity, over } = plannedSelection();
+  const el = $('#plan-count');
+  const tasksText = `${ids.length} task${ids.length === 1 ? '' : 's'}`;
+  el.textContent = capacity
+    ? `${tasksText} · ${total} / ${pts(capacity)}${over ? `: ${pts(over)} over limit` : ''}`
+    : `${tasksText} · ${pts(total)}`;
+  el.classList.toggle('is-over', over > 0);
 }
 
 $('#plan-search').addEventListener('input', (e) => {
@@ -750,9 +817,18 @@ $('#plan-search').addEventListener('input', (e) => {
   for (const li of $('#plan-list').querySelectorAll('li')) li.hidden = Boolean(q) && !li.dataset.search.includes(q);
 });
 
-$('#plan-form').addEventListener('submit', (e) => {
+$('#plan-form').addEventListener('submit', async (e) => {
   e.preventDefault();
-  const ids = [...$('#plan-list').querySelectorAll('input:checked')].map((i) => i.value);
+  const { ids, total, capacity, over } = plannedSelection();
+  if (over > 0) {
+    // Keep the plan open underneath while asking.
+    const ok = await ask({
+      title: 'Over the point limit',
+      message: `This plan has ${pts(total)}, which is ${pts(over)} over the sprint’s ${pts(capacity)} limit.`,
+      okLabel: 'Save anyway',
+    });
+    if (!ok) return;
+  }
   $('#plan-dialog').close();
   const before = state;
   commit(setSprintTasks(state, planningSprintId, ids));
@@ -766,9 +842,11 @@ function openCompleteDialog(sprint) {
   const tasks = tasksInView(state, sprint.id);
   const unfinished = tasks.filter((t) => t.status !== DONE_COLUMN_ID).length;
   $('#complete-title').textContent = `Complete ${sprint.name}?`;
+  const donePoints = sumPoints(tasks.filter((t) => t.status === DONE_COLUMN_ID));
+  const pointsText = sumPoints(tasks) ? ` (${donePoints} of ${pts(sumPoints(tasks))})` : '';
   $('#complete-summary').textContent = unfinished
-    ? `${tasks.length - unfinished} of ${tasks.length} tasks are done. Finished tasks stay in this sprint as a record.`
-    : `All ${tasks.length} tasks are done.`;
+    ? `${tasks.length - unfinished} of ${tasks.length} tasks are done${pointsText}. Finished tasks stay in this sprint as a record.`
+    : `All ${tasks.length} tasks are done${pointsText}.`;
   $('#complete-move-field').hidden = !unfinished;
   $('#complete-move-field span').textContent = `Move ${unfinished} unfinished task${unfinished === 1 ? '' : 's'} to`;
   const planned = sprintsOf(state).filter((sp) => sp.status === 'planned');
@@ -806,30 +884,51 @@ $('#complete-form').addEventListener('submit', (e) => {
 let burndownHidden = (() => {
   try { return localStorage.getItem('taskflow.burndown.hidden') === '1'; } catch { return false; }
 })();
-let burndownPoints = null;
+let burndownPoints = null; // the series in the chosen unit
+let burndownRaw = null; // both units, for the table
+let burndownUnitChoice = (() => {
+  try { return localStorage.getItem('taskflow.burndown.unit'); } catch { return null; }
+})();
+let burndownUnit = 'tasks';
 
 function renderBurndown() {
   const section = $('#burndown');
   const sprint = getSprint(state, currentView());
-  burndownPoints = sprint ? burndownSeries(state, sprint.id) : null;
-  section.hidden = !burndownPoints;
-  if (!burndownPoints) return;
+  burndownRaw = sprint ? burndownSeries(state, sprint.id) : null;
+  section.hidden = !burndownRaw;
+  if (!burndownRaw) {
+    burndownPoints = null;
+    return;
+  }
+  // Measure in points when the sprint's tasks are estimated, unless the
+  // person switched to tasks.
+  const hasPoints = burndownRaw.some((p) => (p.totalPoints ?? 0) > 0);
+  burndownUnit = hasPoints && burndownUnitChoice !== 'tasks' ? 'points' : 'tasks';
+  $('#unit-toggle').hidden = !hasPoints;
+  for (const b of $('#unit-toggle').querySelectorAll('button')) b.setAttribute('aria-pressed', String(b.dataset.unit === burndownUnit));
+  burndownPoints = burndownUnit === 'points'
+    ? burndownRaw.map((p) => ({
+      ...p, remaining: p.remainingPoints, total: p.totalPoints, ideal: p.idealPoints, estimated: p.pointsEstimated,
+    }))
+    : burndownRaw;
   const points = burndownPoints;
   const last = [...points].reverse().find((p) => p.remaining !== null);
+  const unit = burndownUnit === 'points' ? (n) => pts(n) : (n) => `${n}`;
 
-  $('#burndown-sub').textContent = `Open tasks in ${sprint.name}, day by day`;
+  $('#legend-remaining').textContent = burndownUnit === 'points' ? 'Open points' : 'Open tasks';
+  $('#burndown-sub').textContent = `${burndownUnit === 'points' ? 'Story points' : 'Tasks'} still open in ${sprint.name}, day by day`;
   const status = $('#burndown-status');
   let text = '';
   let mode = '';
   if (!last || last.total === 0) {
     text = 'No tasks planned yet';
   } else if (sprint.status === 'completed') {
-    [text, mode] = last.remaining ? [`${last.remaining} open at the end`, 'warn'] : ['✓ All tasks done', 'good'];
+    [text, mode] = last.remaining ? [`${unit(last.remaining)} open at the end`, 'warn'] : ['✓ All tasks done', 'good'];
   } else if (sprint.status === 'planned') {
     text = 'Not started';
   } else {
     const behind = last.remaining - last.ideal;
-    [text, mode] = behind <= 0.5 ? ['✓ On track', 'good'] : [`⚠ ${Math.ceil(behind)} behind ideal`, 'warn'];
+    [text, mode] = behind <= 0.5 ? ['✓ On track', 'good'] : [`⚠ ${unit(Math.ceil(behind))} behind ideal`, 'warn'];
   }
   status.textContent = text;
   status.className = `burndown-status${mode ? ` is-${mode}` : ''}`;
@@ -845,9 +944,17 @@ function renderBurndown() {
     ? `Days before ${formatDay(firstReal.date)} are estimated from when tasks were completed: daily tracking began then.`
     : 'Earlier days are estimated from when tasks were completed.';
 
-  renderBurndownTable(points);
+  renderBurndownTable(burndownRaw);
   if (!burndownHidden) drawBurndown();
 }
+
+$('#unit-toggle').addEventListener('click', (e) => {
+  const unit = e.target.closest('button')?.dataset.unit;
+  if (!unit) return;
+  burndownUnitChoice = unit;
+  try { localStorage.setItem('taskflow.burndown.unit', unit); } catch { /* ignore */ }
+  renderBurndown();
+});
 
 $('#burndown-toggle').addEventListener('click', () => {
   burndownHidden = !burndownHidden;
@@ -858,12 +965,17 @@ $('#burndown-toggle').addEventListener('click', () => {
 function renderBurndownTable(points) {
   const rows = points.filter((p) => p.remaining !== null);
   $('#burndown-table').replaceChildren(h('table', {},
-    h('thead', {}, h('tr', {}, h('th', {}, 'Day'), h('th', {}, 'Open tasks'), h('th', {}, 'Ideal'), h('th', {}, 'Tasks in sprint'))),
+    h('thead', {}, h('tr', {},
+      h('th', {}, 'Day'), h('th', {}, 'Open tasks'), h('th', {}, 'Ideal (tasks)'), h('th', {}, 'Tasks in sprint'),
+      h('th', {}, 'Open points'), h('th', {}, 'Ideal (points)'), h('th', {}, 'Points in sprint'))),
     h('tbody', {}, rows.map((p) => h('tr', {},
-      h('td', {}, formatDay(p.date), p.estimated ? ' (estimated)' : ''),
+      h('td', {}, formatDay(p.date), p.estimated || p.pointsEstimated ? ' (estimated)' : ''),
       h('td', {}, p.remaining),
       h('td', {}, p.ideal),
-      h('td', {}, p.total))))));
+      h('td', {}, p.total),
+      h('td', {}, p.remainingPoints ?? '–'),
+      h('td', {}, p.idealPoints),
+      h('td', {}, p.totalPoints ?? '–'))))));
 }
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -958,7 +1070,8 @@ function drawBurndown() {
         d: line, fill: 'none', stroke: 'var(--chart-remaining)', 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round',
       }),
       svgEl('circle', { cx: x(end.i), cy: y(end.remaining), r: 4, fill: 'var(--chart-remaining)', stroke: 'var(--surface)', 'stroke-width': 2 }),
-      svgEl('text', { class: 'end-label', x: x(end.i) + 8, y: y(end.remaining) - 8 }, `${end.remaining} open`),
+      svgEl('text', { class: 'end-label', x: x(end.i) + 8, y: y(end.remaining) - 8 },
+        `${burndownUnit === 'points' ? pts(end.remaining) : end.remaining} open`),
     );
     // Label the ideal line at its end unless it would collide with the open-tasks label.
     const idealEnd = points[n - 1];
@@ -980,10 +1093,12 @@ function drawBurndown() {
     setChildren(tip,
       h('strong', {}, formatDay(p.date)),
       p.remaining !== null
-        ? h('div', {}, h('i', { class: 'key key-remaining' }), h('b', {}, p.remaining), ' open')
+        ? h('div', {}, h('i', { class: 'key key-remaining' }), h('b', {}, p.remaining), burndownUnit === 'points' ? ' points open' : ' open')
         : h('div', {}, 'Not reached yet'),
       h('div', {}, h('i', { class: 'key key-ideal' }), h('b', {}, p.ideal), ' ideal'),
-      p.total !== null ? h('div', {}, `${p.total} task${p.total === 1 ? '' : 's'} in sprint`) : null,
+      p.total !== null ? h('div', {}, burndownUnit === 'points'
+        ? `${pts(p.total)} in sprint`
+        : `${p.total} task${p.total === 1 ? '' : 's'} in sprint`) : null,
       p.estimated ? h('em', {}, 'Estimated') : null);
     tip.hidden = false;
     const scaleX = host.clientWidth / W;
@@ -1068,7 +1183,7 @@ function renderStats() {
     h('div', { class: 'stat' },
       h('div', { class: 'stat-label' }, 'Open tasks'),
       h('div', { class: 'stat-value' }, s.open),
-      h('div', { class: 'stat-sub' }, `${inProgress} in progress`),
+      h('div', { class: 'stat-sub' }, `${inProgress} in progress · ${pts(sumPoints(viewState().tasks.filter((t) => t.status !== DONE_COLUMN_ID)))}`),
       h('div', { class: 'type-counts' },
         TASK_TYPES.map((type) => h('span', {
           class: `type-${type}`,
@@ -1207,13 +1322,14 @@ function renderCard(task) {
     class: `card priority-${task.priority}${done ? ' is-done' : ''}`,
     tabindex: 0,
     dataset: { id: task.id },
-    'aria-label': `${task.title}, ${task.type ? `${TASK_TYPE_LABELS[task.type]}, ` : ''}${task.priority} priority, ${assigneeKey(task) ? `assigned to ${personFor(assigneeKey(task)).name}` : 'unassigned'}`,
+    'aria-label': `${task.title}, ${task.type ? `${TASK_TYPE_LABELS[task.type]}, ` : ''}${task.priority} priority, ${task.points !== null ? `${pts(task.points)}, ` : ''}${assigneeKey(task) ? `assigned to ${personFor(assigneeKey(task)).name}` : 'unassigned'}`,
     onkeydown: (e) => onCardKey(e, task),
   },
   h('div', { class: 'card-top' },
     h('span', { class: 'card-badges' },
       task.type ? h('span', { class: `type-badge type-${task.type}` }, TASK_TYPE_LABELS[task.type]) : null,
-      h('span', { class: `badge badge-${task.priority}` }, task.priority)),
+      h('span', { class: `badge badge-${task.priority}` }, task.priority),
+      task.points !== null ? h('span', { class: 'points-badge', title: `${pts(task.points)} (story points)` }, pts(task.points)) : null),
     task.dueDate ? h('span', {
       class: `due${overdue ? ' due-overdue' : soon ? ' due-soon' : ''}`,
       title: overdue ? 'Overdue' : 'Due date',
@@ -1280,6 +1396,7 @@ function openTaskDialog(id = null, columnId = null) {
     ...sprintOptions.map((sp) => h('option', { value: sp.id }, `${sp.name}${sp.status === 'active' ? ' (active)' : ''}`)),
   );
   form.sprint.value = task ? task.sprintId : defaultSprintForNewTask();
+  renderPointOptions(task?.points ?? null);
   // Set each radio directly: assigning '' to the group's value doesn't
   // select the "None" option.
   for (const radio of form.type) radio.checked = radio.value === (task?.type ?? '');
@@ -1310,6 +1427,7 @@ form.addEventListener('submit', (e) => {
     priority: PRIORITIES.includes(form.priority.value) ? form.priority.value : 'medium',
     type: TASK_TYPES.includes(form.type.value) ? form.type.value : '',
     sprintId: getSprint(state, form.sprint.value) ? form.sprint.value : '',
+    points: cleanPoints(form.querySelector('input[name="points"]:checked')?.value),
     dueDate: form.dueDate.value,
     tags: normalizeTags(form.tags.value),
   };
@@ -1321,10 +1439,27 @@ form.addEventListener('submit', (e) => {
     form.title.focus();
     return;
   }
+  const before = state;
   commit(editingId ? updateTask(state, editingId, fields) : addTask(state, fields));
   toast(editingId ? 'Task updated' : 'Task created');
+  if (fields.sprintId) warnIfOverLimit(before, fields.sprintId);
   dialog.close();
 });
+
+// Story point choices: not estimated, the usual scale, and the task's own
+// value if it's something else (e.g. imported).
+function renderPointOptions(current) {
+  const values = [...POINT_SCALE];
+  if (current !== null && !values.includes(current)) values.push(current);
+  values.sort((a, b) => a - b);
+  const option = (value, label, cls) => h('label', { class: cls, title: value === '' ? 'Not estimated' : pts(value) },
+    h('input', { type: 'radio', name: 'points', value: String(value), checked: String(value) === String(current ?? '') }),
+    label);
+  $('#points-options').replaceChildren(
+    option('', '–', 'none'),
+    ...values.map((v) => option(v, String(v))),
+  );
+}
 
 // ---------- assignee picker ----------
 // Hosted on claude.ai it searches people in the organization; everywhere
