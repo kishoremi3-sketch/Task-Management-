@@ -86,6 +86,29 @@
       <div class="sprint-actions" id="sprint-actions"></div>
     </section>
 
+    <section class="burndown" id="burndown" aria-labelledby="burndown-title" hidden>
+      <header class="burndown-head">
+        <div class="burndown-heading">
+          <h2 id="burndown-title">Burndown</h2>
+          <p class="burndown-sub" id="burndown-sub"></p>
+        </div>
+        <span class="burndown-status" id="burndown-status"></span>
+        <div class="burndown-legend" aria-hidden="true">
+          <span><i class="key key-remaining"></i>Open tasks</span>
+          <span><i class="key key-ideal"></i>Ideal</span>
+        </div>
+        <button class="btn btn-ghost" id="burndown-toggle" aria-expanded="true" aria-controls="burndown-body">Hide</button>
+      </header>
+      <div id="burndown-body">
+        <div class="burndown-chart" id="burndown-chart"></div>
+        <p class="burndown-note" id="burndown-note" hidden></p>
+        <details class="burndown-table">
+          <summary>View as table</summary>
+          <div class="table-wrap" id="burndown-table"></div>
+        </details>
+      </div>
+    </section>
+
     <section class="stats" id="stats" aria-label="Board summary"></section>
 
     <section class="toolbar" aria-label="Filters">

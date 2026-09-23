@@ -129,7 +129,24 @@ function normalizeSprint(sp) {
     endDate,
     status: SPRINT_STATUSES.includes(sp.status) ? sp.status : 'planned',
     completedAt: sp.completedAt || null,
+    // The local day it was completed, for the burndown.
+    completedOn: ISO_DATE.test(sp.completedOn ?? '') ? sp.completedOn
+      : sp.completedAt ? todayISO(new Date(sp.completedAt)) : null,
+    burndown: normalizeBurndown(sp.burndown),
   };
+}
+
+// Daily snapshots: { 'YYYY-MM-DD': { remaining, total } }.
+function normalizeBurndown(input) {
+  const out = {};
+  if (!input || typeof input !== 'object') return out;
+  const count = (n) => (Number.isFinite(n) && n >= 0 ? Math.round(n) : null);
+  for (const [day, v] of Object.entries(input).sort().slice(-400)) {
+    const remaining = count(v?.remaining);
+    const total = count(v?.total);
+    if (ISO_DATE.test(day) && remaining !== null && total !== null) out[day] = { remaining, total };
+  }
+  return out;
 }
 
 export function sortSprints(sprints) {
@@ -324,31 +341,112 @@ export function updateSprint(state, id, fields) {
   return {
     ...state,
     sprints: sortSprints(sprintsOf(state).map((sp) => (sp.id === id
-      ? normalizeSprint({ ...sp, ...fields, id, status: sp.status, completedAt: sp.completedAt })
+      ? normalizeSprint({
+        ...sp, ...fields, id, status: sp.status, completedAt: sp.completedAt, completedOn: sp.completedOn, burndown: sp.burndown,
+      })
       : sp))),
   };
 }
 
 // Only one sprint can be active; returns the state unchanged otherwise.
-export function startSprint(state, id) {
+export function startSprint(state, id, today = todayISO()) {
   const sprint = getSprint(state, id);
   if (!sprint || sprint.status !== 'planned' || activeSprint(state)) return state;
-  return {
+  return withSnapshot({
     ...state,
     sprints: sprintsOf(state).map((sp) => (sp.id === id ? { ...sp, status: 'active' } : sp)),
+  }, id, today);
+}
+
+export function sprintCounts(state, sprintId) {
+  const tasks = tasksInView(state, sprintId);
+  return { total: tasks.length, remaining: tasks.filter((t) => t.status !== DONE_COLUMN_ID).length };
+}
+
+function withSnapshot(state, sprintId, day) {
+  const sprint = getSprint(state, sprintId);
+  if (!sprint) return state;
+  const counts = sprintCounts(state, sprintId);
+  const prev = sprint.burndown?.[day];
+  if (prev && prev.remaining === counts.remaining && prev.total === counts.total) return state;
+  return {
+    ...state,
+    sprints: sprintsOf(state).map((sp) => (sp.id === sprintId
+      ? { ...sp, burndown: { ...sp.burndown, [day]: counts } }
+      : sp)),
   };
 }
 
+// Records today's open/total task counts for the active sprint. Called on
+// every board change, so the burndown keeps real history, including
+// tasks added to or removed from the sprint along the way.
+export function recordBurndown(state, today = todayISO()) {
+  const sprint = activeSprint(state);
+  if (!sprint || (sprint.startDate && today < sprint.startDate)) return state;
+  return withSnapshot(state, sprint.id, today);
+}
+
+// Chart data for a sprint's burndown, one point per day from the start
+// date to the end date (or to today / completion, if later):
+//   { date, remaining, total, ideal, estimated }
+// remaining/total are null for days that haven't happened yet. Days with
+// no snapshot carry the last snapshot forward; days before the first
+// snapshot are estimated from when the sprint's tasks were completed.
+export function burndownSeries(state, sprintId, today = todayISO()) {
+  const sprint = getSprint(state, sprintId);
+  if (!sprint?.startDate || !sprint.endDate) return null;
+  const history = sprint.burndown ?? {};
+  const tasks = tasksInView(state, sprintId);
+  const live = sprint.status !== 'completed';
+  const completedDay = sprint.completedOn ?? sprint.endDate;
+  const lastActual = live ? today : completedDay;
+  const lastDay = [sprint.endDate, lastActual < sprint.startDate ? sprint.startDate : lastActual].sort()[1];
+  const plannedDays = Math.max(1, daysLeft(sprint, sprint.startDate));
+  const doneBy = (t, day) => t.status === DONE_COLUMN_ID && t.completedAt && todayISO(new Date(t.completedAt)) <= day;
+
+  const points = [];
+  let carried = null;
+  let startTotal = null;
+  for (let day = sprint.startDate, i = 0; day <= lastDay; day = addDays(day, 1), i++) {
+    let counts = null;
+    let estimated = false;
+    if (day <= lastActual) {
+      if (live && day === today) {
+        counts = sprintCounts(state, sprintId);
+      } else if (history[day]) {
+        counts = history[day];
+        carried = counts;
+      } else if (carried) {
+        counts = carried;
+      } else {
+        counts = { total: tasks.length, remaining: tasks.filter((t) => !doneBy(t, day)).length };
+        estimated = true;
+      }
+    }
+    if (i === 0) startTotal = counts?.total ?? tasks.length;
+    const ideal = i >= plannedDays - 1 ? 0 : startTotal * (1 - i / (plannedDays - 1));
+    points.push({
+      date: day,
+      remaining: counts?.remaining ?? null,
+      total: counts?.total ?? null,
+      ideal: Math.round(ideal * 10) / 10,
+      estimated,
+    });
+  }
+  return points;
+}
+
 // Completes a sprint. Done tasks stay in it as a record; unfinished ones
-// move to `moveTo` (another sprint's id, or '' for the backlog).
-export function completeSprint(state, id, moveTo = '') {
-  const sprint = getSprint(state, id);
-  if (!sprint || sprint.status === 'completed') return state;
+// move to `moveTo` (another sprint's id, or '' for the backlog). The
+// final open count is kept for the burndown before anything moves.
+export function completeSprint(state, id, moveTo = '', today = todayISO()) {
+  if (!getSprint(state, id) || getSprint(state, id).status === 'completed') return state;
   const target = moveTo && getSprint(state, moveTo)?.status !== 'completed' && moveTo !== id ? moveTo : '';
+  state = withSnapshot(state, id, today);
   return {
     ...state,
     sprints: sprintsOf(state).map((sp) => (sp.id === id
-      ? { ...sp, status: 'completed', completedAt: new Date().toISOString() }
+      ? { ...sp, status: 'completed', completedAt: new Date().toISOString(), completedOn: today }
       : sp)),
     tasks: state.tasks.map((t) => (t.sprintId === id && t.status !== DONE_COLUMN_ID ? { ...t, sprintId: target } : t)),
   };

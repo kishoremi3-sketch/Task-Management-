@@ -277,3 +277,47 @@ test('normalizeState keeps sprints and drops links to missing ones', () => {
   assert.deepEqual(s.tasks.map((t) => t.sprintId), ['s1', '']);
   assert.deepEqual(normalizeState({ tasks: [] }).sprints, []);
 });
+
+test('burndown: snapshots, carry-forward, estimates, ideal line and completion', async () => {
+  const { addSprint, startSprint, completeSprint, setSprintTasks, recordBurndown, burndownSeries } = await import('../js/store.js');
+  let s = board(['todo', 'A'], ['todo', 'B'], ['todo', 'C'], ['todo', 'D']);
+  s = addSprint(s, { name: 'Sprint 1', startDate: '2026-09-21', endDate: '2026-09-25' });
+  const sid = s.sprints[0].id;
+  s = setSprintTasks(s, sid, s.tasks.map((t) => t.id));
+  s = startSprint(s, sid, '2026-09-21');
+  assert.deepEqual(s.sprints[0].burndown, { '2026-09-21': { remaining: 4, total: 4 } }, 'snapshot on start');
+
+  // Day 2: one task done. Day 3: no activity. Day 4 (today): a task added.
+  const id = (title) => s.tasks.find((t) => t.title === title).id;
+  s = recordBurndown(moveTask(s, id('A'), 'done'), '2026-09-22');
+  assert.equal(recordBurndown(s, '2026-09-22'), s, 'no rewrite when nothing changed');
+  s = addTask(s, { title: 'E', status: 'todo', sprintId: sid });
+  s = recordBurndown(s, '2026-09-24');
+
+  const pts = burndownSeries(s, sid, '2026-09-24');
+  assert.deepEqual(pts.map((p) => p.date), ['2026-09-21', '2026-09-22', '2026-09-23', '2026-09-24', '2026-09-25']);
+  assert.deepEqual(pts.map((p) => p.remaining), [4, 3, 3, 4, null], 'carry forward, scope change, future is null');
+  assert.deepEqual(pts.map((p) => p.total), [4, 4, 4, 5, null]);
+  assert.deepEqual(pts.map((p) => p.ideal), [4, 3, 2, 1, 0], 'ideal runs from starting scope to zero');
+  assert.ok(pts.every((p) => !p.estimated));
+
+  // Completing records the final count before unfinished tasks move out.
+  s = completeSprint(s, sid, '', '2026-09-25');
+  const done = burndownSeries(s, sid, '2026-09-30');
+  assert.equal(done.at(-1).date, '2026-09-25');
+  assert.equal(done.at(-1).remaining, 4);
+});
+
+test('burndown estimates days before any snapshot from completion dates', async () => {
+  const { burndownSeries } = await import('../js/store.js');
+  const day = (iso) => new Date(`${iso}T12:00:00`).toISOString();
+  const s = normalizeState({
+    sprints: [{ id: 's1', name: 'Old', startDate: '2026-09-01', endDate: '2026-09-03', status: 'active' }],
+    tasks: [
+      { title: 'A', status: 'done', sprintId: 's1', completedAt: day('2026-09-02') },
+      { title: 'B', status: 'todo', sprintId: 's1' },
+    ],
+  });
+  const pts = burndownSeries(s, 's1', '2026-09-03');
+  assert.deepEqual(pts.map((p) => [p.remaining, p.estimated]), [[2, true], [1, true], [1, false]], 'today is live, earlier days estimated');
+});

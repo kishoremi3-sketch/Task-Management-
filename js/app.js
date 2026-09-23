@@ -4,7 +4,7 @@ import {
   tasksInColumn, getTask, isOverdue, isDueSoon, allTags, matchesFilter, getStats,
   assigneeKey, allAssigneeKeys, workload,
   sprintsOf, getSprint, activeSprint, nextSprintDefaults, addSprint, updateSprint, startSprint,
-  completeSprint, deleteSprint, setSprintTasks, tasksInView, daysLeft,
+  completeSprint, deleteSprint, setSprintTasks, tasksInView, daysLeft, recordBurndown, burndownSeries,
   addTask, updateTask, deleteTask, moveTask, addColumn, updateColumn, deleteColumn, isOverWip,
   todayISO,
 } from './store.js';
@@ -79,7 +79,8 @@ function setChildren(el, ...children) {
 
 function commit(next) {
   if (!teamId) return;
-  state = next;
+  // Keep today's count for the active sprint's burndown.
+  state = recordBurndown(next);
   backend.saveBoard(teamId, state);
   render();
 }
@@ -560,7 +561,7 @@ function formatDay(iso) {
 
 function daysText(sprint) {
   const today = todayISO();
-  if (sprint.status === 'completed') return { text: `Completed ${formatDay(sprint.completedAt?.slice(0, 10))}`, late: false };
+  if (sprint.status === 'completed') return { text: `Completed ${formatDay(sprint.completedOn)}`, late: false };
   if (sprint.status === 'planned' && sprint.startDate > today) {
     const n = daysLeft({ endDate: sprint.startDate }, today) - 1;
     return { text: n === 1 ? 'Starts tomorrow' : `Starts in ${n} days`, late: false };
@@ -613,7 +614,7 @@ function renderSprintBar() {
         disabled: Boolean(other),
         title: other ? `Complete ${other.name} first` : 'Start this sprint',
         onclick: () => {
-          commit(startSprint(state, sprint.id));
+          commit(startSprint(state, sprint.id, todayISO()));
           toast(`${sprint.name} started`);
         },
       }, 'Start sprint'));
@@ -800,6 +801,223 @@ $('#complete-form').addEventListener('submit', (e) => {
   if (target) chooseSprintView(target.id);
 });
 
+// ---------- burndown chart ----------
+
+let burndownHidden = (() => {
+  try { return localStorage.getItem('taskflow.burndown.hidden') === '1'; } catch { return false; }
+})();
+let burndownPoints = null;
+
+function renderBurndown() {
+  const section = $('#burndown');
+  const sprint = getSprint(state, currentView());
+  burndownPoints = sprint ? burndownSeries(state, sprint.id) : null;
+  section.hidden = !burndownPoints;
+  if (!burndownPoints) return;
+  const points = burndownPoints;
+  const last = [...points].reverse().find((p) => p.remaining !== null);
+
+  $('#burndown-sub').textContent = `Open tasks in ${sprint.name}, day by day`;
+  const status = $('#burndown-status');
+  let text = '';
+  let mode = '';
+  if (!last || last.total === 0) {
+    text = 'No tasks planned yet';
+  } else if (sprint.status === 'completed') {
+    [text, mode] = last.remaining ? [`${last.remaining} open at the end`, 'warn'] : ['✓ All tasks done', 'good'];
+  } else if (sprint.status === 'planned') {
+    text = 'Not started';
+  } else {
+    const behind = last.remaining - last.ideal;
+    [text, mode] = behind <= 0.5 ? ['✓ On track', 'good'] : [`⚠ ${Math.ceil(behind)} behind ideal`, 'warn'];
+  }
+  status.textContent = text;
+  status.className = `burndown-status${mode ? ` is-${mode}` : ''}`;
+
+  $('#burndown-toggle').textContent = burndownHidden ? 'Show' : 'Hide';
+  $('#burndown-toggle').setAttribute('aria-expanded', String(!burndownHidden));
+  $('#burndown-body').hidden = burndownHidden;
+
+  const firstReal = points.find((p) => p.remaining !== null && !p.estimated);
+  const note = $('#burndown-note');
+  note.hidden = !points.some((p) => p.estimated);
+  note.textContent = firstReal
+    ? `Days before ${formatDay(firstReal.date)} are estimated from when tasks were completed: daily tracking began then.`
+    : 'Earlier days are estimated from when tasks were completed.';
+
+  renderBurndownTable(points);
+  if (!burndownHidden) drawBurndown();
+}
+
+$('#burndown-toggle').addEventListener('click', () => {
+  burndownHidden = !burndownHidden;
+  try { localStorage.setItem('taskflow.burndown.hidden', burndownHidden ? '1' : '0'); } catch { /* ignore */ }
+  renderBurndown();
+});
+
+function renderBurndownTable(points) {
+  const rows = points.filter((p) => p.remaining !== null);
+  $('#burndown-table').replaceChildren(h('table', {},
+    h('thead', {}, h('tr', {}, h('th', {}, 'Day'), h('th', {}, 'Open tasks'), h('th', {}, 'Ideal'), h('th', {}, 'Tasks in sprint'))),
+    h('tbody', {}, rows.map((p) => h('tr', {},
+      h('td', {}, formatDay(p.date), p.estimated ? ' (estimated)' : ''),
+      h('td', {}, p.remaining),
+      h('td', {}, p.ideal),
+      h('td', {}, p.total))))));
+}
+
+const SVG_NS = 'http://www.w3.org/2000/svg';
+function svgEl(tag, attrs = {}, ...children) {
+  const el = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs)) if (v !== null && v !== undefined) el.setAttribute(k, v);
+  for (const c of children) if (c !== null && c !== undefined) el.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  return el;
+}
+
+// Rounded-up axis maximum and a whole-number tick step (about 4 ticks).
+function niceScale(max) {
+  const raw = Math.max(1, max) / 4;
+  const pow = 10 ** Math.floor(Math.log10(raw));
+  const step = Math.max(1, [1, 2, 5, 10].map((k) => k * pow).find((v) => v >= raw));
+  return { step, max: Math.max(step, Math.ceil(Math.max(1, max) / step) * step) };
+}
+
+let hoverIndex = null;
+
+function drawBurndown() {
+  const host = $('#burndown-chart');
+  const points = burndownPoints;
+  if (!points || host.offsetParent === null) return;
+  const W = Math.max(280, host.clientWidth);
+  const H = 200;
+  const m = { l: 34, r: 72, t: 18, b: 24 };
+  const n = points.length;
+  const scale = niceScale(Math.max(...points.map((p) => Math.max(p.total ?? 0, p.remaining ?? 0, p.ideal))));
+  const x = (i) => m.l + (n === 1 ? 0 : (i * (W - m.l - m.r)) / (n - 1));
+  const y = (v) => m.t + (1 - v / scale.max) * (H - m.t - m.b);
+  const today = todayISO();
+  const sprint = getSprint(state, currentView());
+
+  const svg = svgEl('svg', {
+    viewBox: `0 0 ${W} ${H}`,
+    role: 'img',
+    tabindex: 0,
+    'aria-label': `Burndown chart. ${$('#burndown-status').textContent}. Use the left and right arrow keys to read each day.`,
+  });
+
+  // Hairline gridlines with whole-number ticks.
+  for (let v = 0; v <= scale.max; v += scale.step) {
+    svg.append(
+      svgEl('line', { x1: m.l, x2: W - m.r, y1: y(v), y2: y(v), stroke: 'var(--border)', 'stroke-width': 1 }),
+      svgEl('text', { x: m.l - 8, y: y(v) + 4, 'text-anchor': 'end' }, v),
+    );
+  }
+
+  // Day labels: always the first and last day, then evenly spaced days
+  // wherever they fit without touching a neighbour.
+  const labelBox = (i) => {
+    const width = formatDay(points[i].date).length * 6.4;
+    const anchor = i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle';
+    const left = anchor === 'start' ? x(i) : anchor === 'end' ? x(i) - width : x(i) - width / 2;
+    return { i, anchor, left, right: left + width };
+  };
+  const kept = [labelBox(0)];
+  if (n > 1) kept.push(labelBox(n - 1));
+  const every = Math.max(1, Math.round(n / Math.max(1, Math.floor((W - m.l - m.r) / 60))));
+  for (let i = every; i < n - 1; i += every) {
+    const box = labelBox(i);
+    if (kept.every((k) => box.right + 8 < k.left || box.left - 8 > k.right)) kept.push(box);
+  }
+  for (const { i, anchor } of kept) {
+    svg.append(svgEl('text', { x: x(i), y: H - 6, 'text-anchor': anchor }, formatDay(points[i].date)));
+  }
+
+  // Today marker (active sprints).
+  const todayIndex = points.findIndex((p) => p.date === today);
+  if (todayIndex > 0 && sprint?.status === 'active') {
+    svg.append(
+      svgEl('line', { x1: x(todayIndex), x2: x(todayIndex), y1: m.t - 4, y2: H - m.b, stroke: 'var(--muted)', 'stroke-width': 1, opacity: 0.45 }),
+      svgEl('text', { x: x(todayIndex), y: m.t - 8, 'text-anchor': 'middle' }, 'Today'),
+    );
+  }
+
+  // Ideal: dashed reference line from the starting scope to zero.
+  svg.append(svgEl('path', {
+    d: points.map((p, i) => `${i ? 'L' : 'M'}${x(i)},${y(p.ideal)}`).join(''),
+    fill: 'none', stroke: 'var(--chart-ideal)', 'stroke-width': 2, 'stroke-dasharray': '5 4', 'stroke-linecap': 'round',
+  }));
+
+  // Open tasks: 10% area wash, 2px line, end dot with a surface ring.
+  const actual = points.map((p, i) => ({ ...p, i })).filter((p) => p.remaining !== null);
+  if (actual.length) {
+    const line = actual.map((p, k) => `${k ? 'L' : 'M'}${x(p.i)},${y(p.remaining)}`).join('');
+    const end = actual[actual.length - 1];
+    svg.append(
+      svgEl('path', { d: `${line}L${x(end.i)},${y(0)}L${x(actual[0].i)},${y(0)}Z`, fill: 'var(--chart-remaining)', opacity: 0.1 }),
+      svgEl('path', {
+        d: line, fill: 'none', stroke: 'var(--chart-remaining)', 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round',
+      }),
+      svgEl('circle', { cx: x(end.i), cy: y(end.remaining), r: 4, fill: 'var(--chart-remaining)', stroke: 'var(--surface)', 'stroke-width': 2 }),
+      svgEl('text', { class: 'end-label', x: x(end.i) + 8, y: y(end.remaining) - 8 }, `${end.remaining} open`),
+    );
+    // Label the ideal line at its end unless it would collide with the open-tasks label.
+    const idealEnd = points[n - 1];
+    const collides = end.i >= n - 2 && Math.abs(y(end.remaining) - 8 - (y(idealEnd.ideal) + 4)) < 14;
+    if (!collides) svg.append(svgEl('text', { x: x(n - 1) + 8, y: y(idealEnd.ideal) + 4 }, 'Ideal'));
+  }
+
+  // Crosshair + readout on hover, or with the arrow keys when focused.
+  const cross = svgEl('line', { y1: m.t, y2: H - m.b, stroke: 'var(--muted)', 'stroke-width': 1, visibility: 'hidden' });
+  const hit = svgEl('rect', { x: m.l - 10, y: 0, width: W - m.l - m.r + 20, height: H, fill: 'transparent' });
+  svg.append(cross, hit);
+  const tip = h('div', { class: 'chart-tip', hidden: true });
+  const show = (i) => {
+    hoverIndex = i;
+    const p = points[i];
+    cross.setAttribute('x1', x(i));
+    cross.setAttribute('x2', x(i));
+    cross.setAttribute('visibility', 'visible');
+    setChildren(tip,
+      h('strong', {}, formatDay(p.date)),
+      p.remaining !== null
+        ? h('div', {}, h('i', { class: 'key key-remaining' }), h('b', {}, p.remaining), ' open')
+        : h('div', {}, 'Not reached yet'),
+      h('div', {}, h('i', { class: 'key key-ideal' }), h('b', {}, p.ideal), ' ideal'),
+      p.total !== null ? h('div', {}, `${p.total} task${p.total === 1 ? '' : 's'} in sprint`) : null,
+      p.estimated ? h('em', {}, 'Estimated') : null);
+    tip.hidden = false;
+    const scaleX = host.clientWidth / W;
+    const px = x(i) * scaleX;
+    tip.style.left = `${px + 12 + tip.offsetWidth > host.clientWidth ? px - tip.offsetWidth - 12 : px + 12}px`;
+  };
+  const hide = () => {
+    hoverIndex = null;
+    cross.setAttribute('visibility', 'hidden');
+    tip.hidden = true;
+  };
+  const indexAt = (clientX) => {
+    const r = svg.getBoundingClientRect();
+    const px = ((clientX - r.left) / r.width) * W;
+    return Math.max(0, Math.min(n - 1, Math.round(((px - m.l) / (W - m.l - m.r)) * (n - 1))));
+  };
+  hit.addEventListener('pointermove', (e) => show(indexAt(e.clientX)));
+  hit.addEventListener('pointerleave', hide);
+  svg.addEventListener('focus', () => show(actual.length ? actual[actual.length - 1].i : 0));
+  svg.addEventListener('blur', hide);
+  svg.addEventListener('keydown', (e) => {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    e.preventDefault();
+    show(Math.max(0, Math.min(n - 1, (hoverIndex ?? 0) + (e.key === 'ArrowRight' ? 1 : -1))));
+  });
+
+  host.replaceChildren(svg, tip);
+}
+
+// Redraw at the new width when the layout changes.
+new ResizeObserver(() => requestAnimationFrame(() => {
+  if (burndownPoints && !burndownHidden) drawBurndown();
+})).observe($('#burndown-chart'));
+
 // ---------- rendering ----------
 
 function render() {
@@ -809,6 +1027,7 @@ function render() {
     $('#welcome-title').textContent = `${currentTeam()?.name ?? 'This team'} has no tasks yet`;
   }
   renderSprintBar();
+  renderBurndown();
   renderStats();
   renderFilters();
   renderBoard();
