@@ -30,7 +30,7 @@ export function todayISO(date = new Date()) {
   return `${y}-${m}-${d}`;
 }
 
-function addDays(iso, days) {
+export function addDays(iso, days) {
   const [y, m, d] = iso.split('-').map(Number);
   return todayISO(new Date(y, m - 1, d + days));
 }
@@ -39,6 +39,7 @@ export function createEmptyState() {
   return {
     version: 1,
     columns: DEFAULT_COLUMNS.map((c) => ({ ...c })),
+    sprints: [],
     tasks: [],
   };
 }
@@ -102,10 +103,38 @@ export function normalizeState(input) {
       }))
     : createEmptyState().columns;
   const columnIds = new Set(columns.map((c) => c.id));
+  const sprints = sortSprints((Array.isArray(input.sprints) ? input.sprints : [])
+    .filter((sp) => sp && typeof sp.id === 'string' && sp.id)
+    .map(normalizeSprint));
+  const sprintIds = new Set(sprints.map((sp) => sp.id));
   const tasks = input.tasks
     .filter((t) => t && typeof t.title === 'string')
-    .map((t) => normalizeTask(t, columnIds.has(t.status) ? t.status : columns[0].id));
-  return { version: 1, columns, tasks: reindex(tasks, columns) };
+    .map((t) => normalizeTask(t, columnIds.has(t.status) ? t.status : columns[0].id))
+    .map((t) => (sprintIds.has(t.sprintId) ? t : { ...t, sprintId: '' }));
+  return { version: 1, columns, sprints, tasks: reindex(tasks, columns) };
+}
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+export const SPRINT_STATUSES = ['planned', 'active', 'completed'];
+
+function normalizeSprint(sp) {
+  const startDate = ISO_DATE.test(sp.startDate ?? '') ? sp.startDate : '';
+  let endDate = ISO_DATE.test(sp.endDate ?? '') ? sp.endDate : '';
+  if (startDate && endDate && endDate < startDate) endDate = startDate;
+  return {
+    id: sp.id,
+    name: String(sp.name ?? '').trim().slice(0, 60) || 'Sprint',
+    goal: String(sp.goal ?? '').trim().slice(0, 300),
+    startDate,
+    endDate,
+    status: SPRINT_STATUSES.includes(sp.status) ? sp.status : 'planned',
+    completedAt: sp.completedAt || null,
+  };
+}
+
+export function sortSprints(sprints) {
+  return [...sprints].sort((a, b) => (a.startDate || '9999').localeCompare(b.startDate || '9999')
+    || a.name.localeCompare(b.name, undefined, { numeric: true }));
 }
 
 function normalizeTask(t, status) {
@@ -117,6 +146,7 @@ function normalizeTask(t, status) {
     status,
     priority: PRIORITIES.includes(t.priority) ? t.priority : 'medium',
     type: TASK_TYPES.includes(t.type) ? t.type : '',
+    sprintId: String(t.sprintId ?? ''),
     dueDate: /^\d{4}-\d{2}-\d{2}$/.test(t.dueDate ?? '') ? t.dueDate : '',
     tags: normalizeTags(t.tags),
     // assigneeId is a person's account id (hosted on claude.ai); assignee
@@ -259,6 +289,111 @@ export function getStats(state, today = todayISO()) {
 }
 
 // ---------- task mutations (return a new state) ----------
+
+// ---------- sprints ----------
+// Sprints belong to a board (so each team has its own). A task is in at
+// most one sprint (task.sprintId); '' means it's in the backlog.
+
+export const sprintsOf = (state) => state.sprints ?? [];
+
+export function getSprint(state, id) {
+  return sprintsOf(state).find((sp) => sp.id === id) ?? null;
+}
+
+export function activeSprint(state) {
+  return sprintsOf(state).find((sp) => sp.status === 'active') ?? null;
+}
+
+// Suggested name and dates for the next sprint: two weeks, starting the
+// day after the latest sprint ends (or today).
+export function nextSprintDefaults(state, today = todayISO(), lengthDays = 14) {
+  const ends = sprintsOf(state).map((sp) => sp.endDate).filter(Boolean).sort();
+  const afterLast = ends.length ? addDays(ends[ends.length - 1], 1) : today;
+  const startDate = afterLast > today ? afterLast : today;
+  const numbers = sprintsOf(state).map((sp) => Number(/(\d+)\s*$/.exec(sp.name)?.[1])).filter(Number.isFinite);
+  const next = numbers.length ? Math.max(...numbers) + 1 : sprintsOf(state).length + 1;
+  return { name: `Sprint ${next}`, startDate, endDate: addDays(startDate, lengthDays - 1), goal: '' };
+}
+
+export function addSprint(state, fields = {}) {
+  const sprint = normalizeSprint({ ...nextSprintDefaults(state), ...fields, id: uid('s'), status: 'planned' });
+  return { ...state, sprints: sortSprints([...sprintsOf(state), sprint]) };
+}
+
+export function updateSprint(state, id, fields) {
+  return {
+    ...state,
+    sprints: sortSprints(sprintsOf(state).map((sp) => (sp.id === id
+      ? normalizeSprint({ ...sp, ...fields, id, status: sp.status, completedAt: sp.completedAt })
+      : sp))),
+  };
+}
+
+// Only one sprint can be active; returns the state unchanged otherwise.
+export function startSprint(state, id) {
+  const sprint = getSprint(state, id);
+  if (!sprint || sprint.status !== 'planned' || activeSprint(state)) return state;
+  return {
+    ...state,
+    sprints: sprintsOf(state).map((sp) => (sp.id === id ? { ...sp, status: 'active' } : sp)),
+  };
+}
+
+// Completes a sprint. Done tasks stay in it as a record; unfinished ones
+// move to `moveTo` (another sprint's id, or '' for the backlog).
+export function completeSprint(state, id, moveTo = '') {
+  const sprint = getSprint(state, id);
+  if (!sprint || sprint.status === 'completed') return state;
+  const target = moveTo && getSprint(state, moveTo)?.status !== 'completed' && moveTo !== id ? moveTo : '';
+  return {
+    ...state,
+    sprints: sprintsOf(state).map((sp) => (sp.id === id
+      ? { ...sp, status: 'completed', completedAt: new Date().toISOString() }
+      : sp)),
+    tasks: state.tasks.map((t) => (t.sprintId === id && t.status !== DONE_COLUMN_ID ? { ...t, sprintId: target } : t)),
+  };
+}
+
+// Deletes a sprint; its tasks go back to the backlog.
+export function deleteSprint(state, id) {
+  if (!getSprint(state, id)) return state;
+  return {
+    ...state,
+    sprints: sprintsOf(state).filter((sp) => sp.id !== id),
+    tasks: state.tasks.map((t) => (t.sprintId === id ? { ...t, sprintId: '' } : t)),
+  };
+}
+
+// Sprint planning: exactly `taskIds` end up in the sprint; tasks that
+// were in it but aren't listed go back to the backlog.
+export function setSprintTasks(state, sprintId, taskIds) {
+  if (!getSprint(state, sprintId)) return state;
+  const chosen = new Set(taskIds);
+  return {
+    ...state,
+    tasks: state.tasks.map((t) => {
+      if (chosen.has(t.id)) return t.sprintId === sprintId ? t : { ...t, sprintId };
+      return t.sprintId === sprintId ? { ...t, sprintId: '' } : t;
+    }),
+  };
+}
+
+// The tasks shown for a sprint view: 'all', 'backlog' or a sprint id.
+export function tasksInView(state, view) {
+  if (view === 'backlog') return state.tasks.filter((t) => !t.sprintId);
+  if (view && view !== 'all') return state.tasks.filter((t) => t.sprintId === view);
+  return state.tasks;
+}
+
+// Days from `today` to the sprint's last day, inclusive; negative once over.
+export function daysLeft(sprint, today = todayISO()) {
+  if (!sprint?.endDate) return null;
+  const toDate = (iso) => {
+    const [y, m, d] = iso.split('-').map(Number);
+    return Date.UTC(y, m - 1, d);
+  };
+  return Math.round((toDate(sprint.endDate) - toDate(today)) / 86400000) + 1;
+}
 
 export function addTask(state, fields) {
   const status = state.columns.some((c) => c.id === fields.status) ? fields.status : state.columns[0].id;

@@ -229,3 +229,51 @@ test('task types: validated, filterable, searchable and counted', () => {
   s = updateTask(s, byTitle('Misc').id, { type: 'project' });
   assert.equal(byTitle('Misc').type, 'project');
 });
+
+test('sprints: defaults, lifecycle, planning and completion', async () => {
+  const { addSprint, startSprint, completeSprint, deleteSprint, setSprintTasks, tasksInView,
+    activeSprint, nextSprintDefaults, daysLeft, updateSprint } = await import('../js/store.js');
+  const today = '2026-09-23';
+  let s = board(['todo', 'A'], ['todo', 'B'], ['in-progress', 'C'], ['done', 'D']);
+  const id = (title) => s.tasks.find((t) => t.title === title).id;
+
+  assert.deepEqual(nextSprintDefaults(s, today), { name: 'Sprint 1', startDate: today, endDate: '2026-10-06', goal: '' });
+  s = addSprint(s, { ...nextSprintDefaults(s, today), goal: 'Ship login' });
+  const s1 = s.sprints[0];
+  assert.equal(s1.status, 'planned');
+  assert.deepEqual(nextSprintDefaults(s, today), { name: 'Sprint 2', startDate: '2026-10-07', endDate: '2026-10-20', goal: '' });
+  s = addSprint(s, nextSprintDefaults(s, today));
+  const s2 = s.sprints[1];
+
+  s = setSprintTasks(s, s1.id, [id('A'), id('C'), id('D')]);
+  assert.deepEqual(tasksInView(s, s1.id).map((t) => t.title).sort(), ['A', 'C', 'D']);
+  assert.deepEqual(tasksInView(s, 'backlog').map((t) => t.title), ['B']);
+  s = setSprintTasks(s, s1.id, [id('A'), id('C'), id('D'), id('B')].filter((x) => x !== id('A')));
+  assert.equal(s.tasks.find((t) => t.title === 'A').sprintId, '', 'unchecked tasks return to the backlog');
+
+  s = startSprint(s, s1.id);
+  assert.equal(activeSprint(s).id, s1.id);
+  assert.equal(startSprint(s, s2.id), s, 'only one active sprint at a time');
+  assert.equal(daysLeft(activeSprint(s), today), 14);
+  assert.equal(daysLeft(activeSprint(s), '2026-10-06'), 1);
+
+  s = completeSprint(s, s1.id, s2.id);
+  assert.equal(s.sprints.find((sp) => sp.id === s1.id).status, 'completed');
+  assert.deepEqual(tasksInView(s, s2.id).map((t) => t.title).sort(), ['B', 'C'], 'unfinished tasks roll over');
+  assert.deepEqual(tasksInView(s, s1.id).map((t) => t.title), ['D'], 'done tasks stay as a record');
+
+  s = updateSprint(s, s2.id, { name: 'Sprint 2 — polish', endDate: '2026-10-01' });
+  assert.equal(s.sprints.find((sp) => sp.id === s2.id).endDate, '2026-10-07', 'end date can’t precede start');
+  s = deleteSprint(s, s2.id);
+  assert.deepEqual(tasksInView(s, 'backlog').map((t) => t.title).sort(), ['A', 'B', 'C']);
+});
+
+test('normalizeState keeps sprints and drops links to missing ones', () => {
+  const s = normalizeState({
+    sprints: [{ id: 's1', name: 'Sprint 1', startDate: '2026-09-01', endDate: '2026-09-14', status: 'weird' }],
+    tasks: [{ title: 'In sprint', sprintId: 's1' }, { title: 'Orphan', sprintId: 'gone' }],
+  });
+  assert.equal(s.sprints[0].status, 'planned');
+  assert.deepEqual(s.tasks.map((t) => t.sprintId), ['s1', '']);
+  assert.deepEqual(normalizeState({ tasks: [] }).sprints, []);
+});

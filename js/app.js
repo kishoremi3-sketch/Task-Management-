@@ -3,6 +3,8 @@ import {
   createEmptyState, createSampleState, normalizeState, normalizeTags,
   tasksInColumn, getTask, isOverdue, isDueSoon, allTags, matchesFilter, getStats,
   assigneeKey, allAssigneeKeys, workload,
+  sprintsOf, getSprint, activeSprint, nextSprintDefaults, addSprint, updateSprint, startSprint,
+  completeSprint, deleteSprint, setSprintTasks, tasksInView, daysLeft,
   addTask, updateTask, deleteTask, moveTask, addColumn, updateColumn, deleteColumn, isOverWip,
   todayISO,
 } from './store.js';
@@ -36,6 +38,10 @@ let canManageTeams = false;
 let userApi = null;
 const people = new Map(); // account id -> { name, avatarUrl, color }
 
+// Which sprint the board shows: the person's choice for this team
+// ('all', 'backlog' or a sprint id), or null for "the active sprint".
+let sprintChoice = null;
+
 const EMPTY_FILTER = { query: '', priority: '', type: '', assignee: '', tag: '', due: '' };
 let filter = { ...EMPTY_FILTER };
 let editingId = null;
@@ -61,6 +67,12 @@ function h(tag, props = {}, ...children) {
     el.append(child instanceof Node ? child : document.createTextNode(String(child)));
   }
   return el;
+}
+
+// Like el.replaceChildren, but skips null/false children (replaceChildren
+// would render them as the text "null").
+function setChildren(el, ...children) {
+  el.replaceChildren(...children.flat().filter((c) => c !== null && c !== undefined && c !== false));
 }
 
 // ---------- state ----------
@@ -204,8 +216,12 @@ function selectTeam(id) {
   $('#filter-priority').value = '';
   $('#filter-type').value = '';
   $('#filter-due').value = '';
+  sprintChoice = null;
   if (id) {
-    try { localStorage.setItem(TEAM_PREF_KEY, id); } catch { /* ignore */ }
+    try {
+      localStorage.setItem(TEAM_PREF_KEY, id);
+      sprintChoice = localStorage.getItem(`taskflow.sprint:${id}`);
+    } catch { /* ignore */ }
     state = backend.cachedBoard(id) ?? createEmptyState();
     closeBoard = backend.openBoard(id, (board) => {
       if (JSON.stringify(board) === JSON.stringify(state) || drag.active) return;
@@ -426,7 +442,7 @@ membersDialog.addEventListener('click', (e) => {
 
 function renderTeams() {
   const showCounts = membersEnabled() && canManageTeams;
-  $('#teams').replaceChildren(
+  setChildren($('#teams'),
     ...teams.map((t) => {
       const active = t.id === teamId;
       const count = teamMembers(t).length;
@@ -506,6 +522,284 @@ function ask({ title, message = '', value = null, okLabel = 'OK', danger = false
   });
 }
 
+// ---------- sprints ----------
+
+// The view in effect: the person's choice if it still exists, otherwise
+// the active sprint, otherwise everything.
+function currentView() {
+  if (sprintChoice === 'all' || sprintChoice === 'backlog') return sprintChoice;
+  if (sprintChoice && getSprint(state, sprintChoice)) return sprintChoice;
+  return activeSprint(state)?.id ?? 'all';
+}
+
+function viewState() {
+  return { ...state, tasks: tasksInView(state, currentView()) };
+}
+
+function chooseSprintView(view) {
+  sprintChoice = view;
+  try { if (teamId) localStorage.setItem(`taskflow.sprint:${teamId}`, view); } catch { /* ignore */ }
+  render();
+}
+
+// New tasks join the sprint being viewed, unless it's already completed.
+function defaultSprintForNewTask() {
+  const sprint = getSprint(state, currentView());
+  return sprint && sprint.status !== 'completed' ? sprint.id : '';
+}
+
+const STATUS_LABEL = { planned: 'Planned', active: 'Active', completed: 'Completed' };
+
+function formatDay(iso) {
+  if (!iso) return '';
+  const [y, m, d] = iso.split('-').map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString(undefined, {
+    month: 'short', day: 'numeric', year: y === new Date().getFullYear() ? undefined : 'numeric',
+  });
+}
+
+function daysText(sprint) {
+  const today = todayISO();
+  if (sprint.status === 'completed') return { text: `Completed ${formatDay(sprint.completedAt?.slice(0, 10))}`, late: false };
+  if (sprint.status === 'planned' && sprint.startDate > today) {
+    const n = daysLeft({ endDate: sprint.startDate }, today) - 1;
+    return { text: n === 1 ? 'Starts tomorrow' : `Starts in ${n} days`, late: false };
+  }
+  const left = daysLeft(sprint, today);
+  if (left === null) return { text: '', late: false };
+  if (left > 1) return { text: `${left} days left`, late: false };
+  if (left === 1) return { text: 'Last day', late: false };
+  return { text: `Ended ${-left + 1} day${-left + 1 === 1 ? '' : 's'} ago`, late: true };
+}
+
+function renderSprintBar() {
+  const view = currentView();
+  const sprints = sprintsOf(state);
+  const open = sprints.filter((sp) => sp.status !== 'completed');
+  const done = sprints.filter((sp) => sp.status === 'completed');
+  const backlogCount = tasksInView(state, 'backlog').length;
+  const option = (value, label) => h('option', { value, selected: value === view }, label);
+  setChildren($('#sprint-view'),
+    option('all', `All tasks (${state.tasks.length})`),
+    option('backlog', `Backlog: not in a sprint (${backlogCount})`),
+    open.length ? h('optgroup', { label: 'Sprints' },
+      open.map((sp) => option(sp.id, `${sp.name} · ${STATUS_LABEL[sp.status]}`))) : null,
+    done.length ? h('optgroup', { label: 'Completed sprints' },
+      done.slice().reverse().map((sp) => option(sp.id, sp.name))) : null,
+  );
+
+  const sprint = getSprint(state, view);
+  const info = $('#sprint-info');
+  const actions = [];
+  if (sprint) {
+    const tasks = tasksInView(state, sprint.id);
+    const finished = tasks.filter((t) => t.status === DONE_COLUMN_ID).length;
+    const pct = tasks.length ? Math.round((finished / tasks.length) * 100) : 0;
+    const days = daysText(sprint);
+    setChildren(info,
+      h('span', { class: `sprint-status is-${sprint.status}` }, STATUS_LABEL[sprint.status]),
+      h('span', {}, `${formatDay(sprint.startDate)} – ${formatDay(sprint.endDate)}`),
+      days.text ? h('span', { class: `sprint-days${days.late ? ' is-late' : ''}` }, days.text) : null,
+      h('span', { class: 'sprint-progress' },
+        h('span', { class: 'progress', role: 'progressbar', 'aria-label': 'Sprint progress', 'aria-valuenow': pct, 'aria-valuemin': 0, 'aria-valuemax': 100 },
+          h('span', { class: 'progress-fill', style: `width:${pct}%` })),
+        `${finished} of ${tasks.length} done`),
+      sprint.goal ? h('span', { class: 'sprint-goal' }, `Goal: ${sprint.goal}`) : null);
+    const other = activeSprint(state);
+    if (sprint.status !== 'completed') actions.push(h('button', { class: 'btn', onclick: () => openPlanDialog(sprint) }, 'Plan sprint'));
+    if (sprint.status === 'planned') {
+      actions.push(h('button', {
+        class: 'btn btn-primary',
+        disabled: Boolean(other),
+        title: other ? `Complete ${other.name} first` : 'Start this sprint',
+        onclick: () => {
+          commit(startSprint(state, sprint.id));
+          toast(`${sprint.name} started`);
+        },
+      }, 'Start sprint'));
+    }
+    if (sprint.status === 'active') actions.push(h('button', { class: 'btn btn-primary', onclick: () => openCompleteDialog(sprint) }, 'Complete sprint'));
+    actions.push(h('button', { class: 'btn', onclick: () => openSprintDialog(sprint) }, 'Edit'));
+  } else if (view === 'backlog') {
+    info.replaceChildren(h('span', {}, backlogCount
+      ? `${backlogCount} task${backlogCount === 1 ? '' : 's'} not in any sprint. Open a sprint and use Plan sprint to pull them in.`
+      : 'Every task is in a sprint.'));
+  } else {
+    info.replaceChildren(h('span', {}, sprints.length
+      ? 'Every task on this team’s board, in all sprints and the backlog.'
+      : 'Group this team’s tasks into sprints to focus on a few weeks of work at a time.'));
+  }
+  actions.push(h('button', { class: `btn${sprints.length ? '' : ' btn-primary'}`, onclick: () => openSprintDialog(null) }, '+ New sprint'));
+  $('#sprint-actions').replaceChildren(...actions);
+}
+
+$('#sprint-view').addEventListener('change', (e) => chooseSprintView(e.target.value));
+
+// Close buttons and backdrop clicks for the sprint dialogs.
+for (const id of ['#sprint-dialog', '#plan-dialog', '#complete-dialog']) {
+  $(id).addEventListener('click', (e) => {
+    if (e.target === $(id) || e.target.closest('[data-close]')) $(id).close();
+  });
+}
+
+// Create (sprint = null) or edit a sprint.
+let editingSprintId = null;
+function openSprintDialog(sprint) {
+  editingSprintId = sprint?.id ?? null;
+  const values = sprint ?? nextSprintDefaults(state);
+  $('#sprint-dialog-title').textContent = sprint ? `Edit ${sprint.name}` : 'New sprint';
+  $('#sprint-save').textContent = sprint ? 'Save changes' : 'Create sprint';
+  $('#sprint-name').value = values.name;
+  $('#sprint-start').value = values.startDate;
+  $('#sprint-end').value = values.endDate;
+  $('#sprint-goal').value = values.goal ?? '';
+  $('#sprint-delete').hidden = !sprint;
+  $('#sprint-error').hidden = true;
+  $('#sprint-dialog').showModal();
+  $('#sprint-name').focus();
+}
+
+$('#sprint-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const fields = {
+    name: $('#sprint-name').value.trim(),
+    startDate: $('#sprint-start').value,
+    endDate: $('#sprint-end').value,
+    goal: $('#sprint-goal').value.trim(),
+  };
+  if (fields.endDate < fields.startDate) {
+    $('#sprint-error').textContent = 'The end date must be on or after the start date.';
+    $('#sprint-error').hidden = false;
+    return;
+  }
+  $('#sprint-dialog').close();
+  if (editingSprintId) {
+    commit(updateSprint(state, editingSprintId, fields));
+    toast('Sprint updated');
+    return;
+  }
+  const before = new Set(sprintsOf(state).map((sp) => sp.id));
+  const next = addSprint(state, fields);
+  const created = sprintsOf(next).find((sp) => !before.has(sp.id));
+  commit(next);
+  chooseSprintView(created.id);
+  toast(`${created.name} created. Use Plan sprint to add tasks.`);
+});
+
+$('#sprint-delete').addEventListener('click', async () => {
+  const sprint = getSprint(state, editingSprintId);
+  if (!sprint) return;
+  $('#sprint-dialog').close();
+  const n = tasksInView(state, sprint.id).length;
+  const ok = await ask({
+    title: `Delete ${sprint.name}?`,
+    message: n ? `Its ${n} task(s) aren’t deleted; they go back to the backlog.` : 'It has no tasks.',
+    okLabel: 'Delete sprint',
+    danger: true,
+  });
+  if (!ok) return;
+  const before = state;
+  commit(deleteSprint(state, sprint.id));
+  toast(`Deleted ${sprint.name}`, { label: 'Undo', run: () => commit(before) });
+});
+
+// Sprint planning: tick the tasks that belong in the sprint.
+let planningSprintId = null;
+function openPlanDialog(sprint) {
+  planningSprintId = sprint.id;
+  $('#plan-title').textContent = `Plan ${sprint.name}`;
+  $('#plan-search').value = '';
+  const columnName = (id) => state.columns.find((c) => c.id === id)?.title ?? '';
+  const row = (task, checked) => {
+    const key = assigneeKey(task);
+    return h('li', { dataset: { search: `${task.title} ${task.tags.join(' ')} ${key ? personFor(key).name : ''}`.toLowerCase() } },
+      h('label', { class: 'plan-row' },
+        h('input', { type: 'checkbox', value: task.id, checked, onchange: updatePlanCount }),
+        task.type ? h('span', { class: `type-badge type-${task.type}` }, TASK_TYPE_LABELS[task.type]) : h('span'),
+        h('span', { class: 'plan-title' }, task.title),
+        h('span', { class: 'plan-meta' }, [columnName(task.status), key ? shortName(personFor(key).name) : null].filter(Boolean).join(' · '))));
+  };
+  const inSprint = state.tasks.filter((t) => t.sprintId === sprint.id);
+  const backlog = state.tasks.filter((t) => !t.sprintId && t.status !== DONE_COLUMN_ID);
+  const elsewhere = state.tasks.filter((t) => t.sprintId && t.sprintId !== sprint.id
+    && t.status !== DONE_COLUMN_ID && getSprint(state, t.sprintId)?.status !== 'completed');
+  const group = (title, tasks, checked) => (tasks.length
+    ? h('section', { class: 'plan-group' }, h('h3', {}, `${title} (${tasks.length})`), h('ul', {}, tasks.map((t) => row(t, checked))))
+    : null);
+  const groups = [
+    group(`In ${sprint.name}`, inSprint, true),
+    group('Backlog', backlog, false),
+    ...sprintsOf(state).filter((sp) => sp.id !== sprint.id)
+      .map((sp) => group(`In ${sp.name}`, elsewhere.filter((t) => t.sprintId === sp.id), false)),
+  ].filter(Boolean);
+  $('#plan-list').replaceChildren(...(groups.length ? groups
+    : [h('p', { class: 'plan-empty' }, 'There are no open tasks to plan. Add tasks to the board first.')]));
+  updatePlanCount();
+  $('#plan-dialog').showModal();
+  $('#plan-search').focus();
+}
+
+function updatePlanCount() {
+  const n = $('#plan-list').querySelectorAll('input:checked').length;
+  $('#plan-count').textContent = `${n} task${n === 1 ? '' : 's'} in this sprint`;
+}
+
+$('#plan-search').addEventListener('input', (e) => {
+  const q = e.target.value.trim().toLowerCase();
+  for (const li of $('#plan-list').querySelectorAll('li')) li.hidden = Boolean(q) && !li.dataset.search.includes(q);
+});
+
+$('#plan-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const ids = [...$('#plan-list').querySelectorAll('input:checked')].map((i) => i.value);
+  $('#plan-dialog').close();
+  const before = state;
+  commit(setSprintTasks(state, planningSprintId, ids));
+  toast(`Saved plan for ${getSprint(state, planningSprintId)?.name}`, { label: 'Undo', run: () => commit(before) });
+});
+
+// Completing: choose where unfinished tasks go.
+let completingSprintId = null;
+function openCompleteDialog(sprint) {
+  completingSprintId = sprint.id;
+  const tasks = tasksInView(state, sprint.id);
+  const unfinished = tasks.filter((t) => t.status !== DONE_COLUMN_ID).length;
+  $('#complete-title').textContent = `Complete ${sprint.name}?`;
+  $('#complete-summary').textContent = unfinished
+    ? `${tasks.length - unfinished} of ${tasks.length} tasks are done. Finished tasks stay in this sprint as a record.`
+    : `All ${tasks.length} tasks are done.`;
+  $('#complete-move-field').hidden = !unfinished;
+  $('#complete-move-field span').textContent = `Move ${unfinished} unfinished task${unfinished === 1 ? '' : 's'} to`;
+  const planned = sprintsOf(state).filter((sp) => sp.status === 'planned');
+  $('#complete-move').replaceChildren(
+    ...planned.map((sp) => h('option', { value: sp.id }, sp.name)),
+    h('option', { value: '__new' }, `A new sprint (${nextSprintDefaults(state).name})`),
+    h('option', { value: '' }, 'The backlog'),
+  );
+  $('#complete-dialog').showModal();
+}
+
+$('#complete-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  $('#complete-dialog').close();
+  const sprint = getSprint(state, completingSprintId);
+  if (!sprint) return;
+  let next = state;
+  let moveTo = $('#complete-move-field').hidden ? '' : $('#complete-move').value;
+  if (moveTo === '__new') {
+    const before = new Set(sprintsOf(next).map((sp) => sp.id));
+    next = addSprint(next, nextSprintDefaults(next));
+    moveTo = sprintsOf(next).find((sp) => !before.has(sp.id)).id;
+  }
+  const moved = tasksInView(next, sprint.id).filter((t) => t.status !== DONE_COLUMN_ID).length;
+  const previous = state;
+  commit(completeSprint(next, sprint.id, moveTo));
+  const target = getSprint(state, moveTo);
+  toast(`${sprint.name} completed${moved ? `. ${moved} unfinished task(s) moved to ${target ? target.name : 'the backlog'}` : ''}`,
+    { label: 'Undo', run: () => commit(previous) });
+  if (target) chooseSprintView(target.id);
+});
+
 // ---------- rendering ----------
 
 function render() {
@@ -514,6 +808,7 @@ function render() {
   if (!welcome.hidden) {
     $('#welcome-title').textContent = `${currentTeam()?.name ?? 'This team'} has no tasks yet`;
   }
+  renderSprintBar();
   renderStats();
   renderFilters();
   renderBoard();
@@ -521,7 +816,7 @@ function render() {
 }
 
 function renderStats() {
-  const s = getStats(state);
+  const s = getStats(viewState());
   const inProgress = s.byColumn['in-progress'] ?? 0;
   const tile = (label, value, sub, mod = '') => h('div', { class: `stat ${mod}` },
     h('div', { class: 'stat-label' }, label),
@@ -570,7 +865,7 @@ function renderStats() {
 
 // Open tasks per person; clicking a row filters the board to them.
 function renderPeopleStat() {
-  const load = workload(state);
+  const load = workload(viewState());
   const unassigned = load.get('') ?? 0;
   const rows = [...load].filter(([key]) => key).sort((a, b) => b[1] - a[1]);
   const shown = rows.slice(0, 4);
@@ -656,7 +951,7 @@ function renderBoard() {
 }
 
 function renderColumn(column, index) {
-  const all = tasksInColumn(state, column.id);
+  const all = tasksInColumn(viewState(), column.id);
   const ctx = peopleContext();
   const visible = all.filter((t) => matchesFilter(t, filter, undefined, ctx));
   const overWip = isOverWip(state, column.id);
@@ -707,7 +1002,10 @@ function renderCard(task) {
   h('h4', { class: 'card-title' }, task.title),
   task.description ? h('p', { class: 'card-desc' }, task.description) : null,
   h('div', { class: 'card-bottom' },
-    h('div', { class: 'tags' }, task.tags.map((t) => h('span', { class: 'tag', style: `--hue:${hue(t)}` }, t))),
+    h('div', { class: 'tags' },
+      currentView() === 'all' && task.sprintId
+        ? h('span', { class: 'card-sprint', title: 'Sprint' }, getSprint(state, task.sprintId)?.name) : null,
+      task.tags.map((t) => h('span', { class: 'tag', style: `--hue:${hue(t)}` }, t))),
     renderAssignee(task)));
 }
 
@@ -757,6 +1055,12 @@ function openTaskDialog(id = null, columnId = null) {
   form.description.value = task?.description ?? '';
   form.status.value = task?.status ?? columnId ?? state.columns[0].id;
   form.priority.value = task?.priority ?? 'medium';
+  const sprintOptions = sprintsOf(state).filter((sp) => sp.status !== 'completed' || sp.id === task?.sprintId);
+  form.sprint.replaceChildren(
+    h('option', { value: '' }, 'No sprint (backlog)'),
+    ...sprintOptions.map((sp) => h('option', { value: sp.id }, `${sp.name}${sp.status === 'active' ? ' (active)' : ''}`)),
+  );
+  form.sprint.value = task ? task.sprintId : defaultSprintForNewTask();
   // Set each radio directly: assigning '' to the group's value doesn't
   // select the "None" option.
   for (const radio of form.type) radio.checked = radio.value === (task?.type ?? '');
@@ -786,6 +1090,7 @@ form.addEventListener('submit', (e) => {
     status: form.status.value,
     priority: PRIORITIES.includes(form.priority.value) ? form.priority.value : 'medium',
     type: TASK_TYPES.includes(form.type.value) ? form.type.value : '',
+    sprintId: getSprint(state, form.sprint.value) ? form.sprint.value : '',
     dueDate: form.dueDate.value,
     tags: normalizeTags(form.tags.value),
   };
@@ -955,7 +1260,9 @@ function quickAdd(e, columnId) {
   const title = input.value.trim();
   if (!title) return;
   input.value = '';
-  commit(addTask(state, { title, status: columnId }));
+  const sprintId = defaultSprintForNewTask();
+  commit(addTask(state, { title, status: columnId, sprintId }));
+  if (!sprintId && !['all', 'backlog'].includes(currentView())) toast('Added to the backlog (this sprint is completed)');
 }
 
 // Keyboard support for cards: Enter to edit, Delete to remove,
@@ -1341,7 +1648,7 @@ $('#theme-btn').addEventListener('click', () => {
 
 document.addEventListener('keydown', (e) => {
   if (document.body.dataset.view !== 'app' || !teamId) return;
-  if (dialog.open || askDialog.open || membersDialog.open || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (document.querySelector('dialog[open]') || e.ctrlKey || e.metaKey || e.altKey) return;
   const typing = e.target.closest('input, textarea, select, [contenteditable]');
   if (e.key === 'Escape') closePopups();
   if (typing) return;

@@ -77,6 +77,15 @@
     </section>
 
     <div id="team-view" hidden>
+    <section class="sprint-bar" id="sprint-bar" aria-label="Sprint">
+      <div class="sprint-pick">
+        <label for="sprint-view">Showing</label>
+        <select id="sprint-view"></select>
+      </div>
+      <div class="sprint-info" id="sprint-info"></div>
+      <div class="sprint-actions" id="sprint-actions"></div>
+    </section>
+
     <section class="stats" id="stats" aria-label="Board summary"></section>
 
     <section class="toolbar" aria-label="Filters">
@@ -167,6 +176,10 @@
         </div>
       </div>
       <div class="field-row">
+        <label class="field sprint-field">
+          <span>Sprint</span>
+          <select name="sprint" id="task-sprint"></select>
+        </label>
         <fieldset class="field type-field">
           <legend>Type</legend>
           <div class="type-options">
@@ -200,6 +213,74 @@
         <span class="spacer"></span>
         <button type="button" class="btn btn-ghost" id="ask-cancel">Cancel</button>
         <button type="submit" class="btn btn-primary" id="ask-ok">OK</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="sprint-dialog" class="sprint-dialog" aria-labelledby="sprint-dialog-title">
+    <form id="sprint-form">
+      <header class="dialog-header">
+        <h2 id="sprint-dialog-title">New sprint</h2>
+        <button type="button" class="btn btn-ghost icon-btn" data-close aria-label="Close">✕</button>
+      </header>
+      <label class="field">
+        <span>Name</span>
+        <input id="sprint-name" required maxlength="60" autocomplete="off">
+      </label>
+      <div class="field-row">
+        <label class="field">
+          <span>Start date</span>
+          <input type="date" id="sprint-start" required>
+        </label>
+        <label class="field">
+          <span>End date</span>
+          <input type="date" id="sprint-end" required>
+        </label>
+      </div>
+      <label class="field">
+        <span>Goal <small>(optional)</small></span>
+        <textarea id="sprint-goal" rows="2" maxlength="300" placeholder="What should this sprint achieve?"></textarea>
+      </label>
+      <p class="signin-error" id="sprint-error" role="alert" hidden></p>
+      <footer class="dialog-footer">
+        <button type="button" class="btn btn-danger" id="sprint-delete" hidden>Delete sprint</button>
+        <span class="spacer"></span>
+        <button type="button" class="btn btn-ghost" data-close>Cancel</button>
+        <button type="submit" class="btn btn-primary" id="sprint-save">Create sprint</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="plan-dialog" class="plan-dialog" aria-labelledby="plan-title">
+    <form id="plan-form">
+      <header class="dialog-header">
+        <h2 id="plan-title">Plan sprint</h2>
+        <button type="button" class="btn btn-ghost icon-btn" data-close aria-label="Close">✕</button>
+      </header>
+      <p class="ask-message">Tick the tasks that belong in this sprint. Unticked tasks go back to the backlog.</p>
+      <input type="search" id="plan-search" placeholder="Filter tasks…" aria-label="Filter tasks" autocomplete="off">
+      <div class="plan-list" id="plan-list"></div>
+      <footer class="dialog-footer">
+        <span class="plan-count" id="plan-count"></span>
+        <span class="spacer"></span>
+        <button type="button" class="btn btn-ghost" data-close>Cancel</button>
+        <button type="submit" class="btn btn-primary">Save plan</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="complete-dialog" class="ask-dialog" aria-labelledby="complete-title">
+    <form id="complete-form">
+      <h2 id="complete-title">Complete sprint</h2>
+      <p class="ask-message" id="complete-summary"></p>
+      <label class="field" id="complete-move-field">
+        <span>Move unfinished tasks to</span>
+        <select id="complete-move"></select>
+      </label>
+      <footer class="dialog-footer">
+        <span class="spacer"></span>
+        <button type="button" class="btn btn-ghost" data-close>Cancel</button>
+        <button type="submit" class="btn btn-primary">Complete sprint</button>
       </footer>
     </form>
   </dialog>
