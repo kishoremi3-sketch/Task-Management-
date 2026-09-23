@@ -105,7 +105,7 @@ button { cursor: pointer; }
 
 .topbar {
   position: sticky;
-  top: 0;
+  top: env(safe-area-inset-top, 0px);
   z-index: 20;
   display: flex;
   align-items: center;
@@ -148,6 +148,29 @@ button { cursor: pointer; }
 .btn-ghost:hover { background: var(--surface-2); }
 .btn-danger { background: transparent; color: var(--danger); border-color: var(--danger); }
 .btn-danger:hover { background: var(--danger); color: var(--surface); }
+.btn-danger-solid { background: var(--danger); color: var(--surface); }
+
+.sync {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.sync::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.sync[data-mode="ok"]::before { background: var(--success); }
+.sync[data-mode="busy"]::before { background: var(--warn); }
+.sync[data-mode="warn"]::before { background: var(--danger); }
 
 .icon-btn {
   display: inline-grid;
@@ -500,6 +523,13 @@ dialog {
   box-shadow: var(--shadow-lg);
 }
 
+.ask-dialog { width: min(420px, calc(100vw - 32px)); }
+#ask-form { display: flex; flex-direction: column; gap: 12px; padding: 18px 20px 20px; }
+#ask-form h2 { margin: 0; font-size: 17px; text-wrap: balance; }
+.ask-message { margin: 0; color: var(--muted); }
+.ask-message:empty { display: none; }
+#ask-input { width: 100%; padding: 8px 10px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
+
 dialog::backdrop { background: rgb(10 12 20 / 0.5); }
 
 #task-form { display: flex; flex-direction: column; gap: 12px; padding: 18px 20px 20px; }
@@ -566,6 +596,7 @@ dialog::backdrop { background: rgb(10 12 20 / 0.5); }
   .column { flex-basis: 82vw; max-height: none; }
   .field-row { flex-direction: column; }
   #new-task-btn { padding: 7px 10px; }
+  .sync { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {

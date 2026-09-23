@@ -13,6 +13,7 @@ TaskFlow is a lightweight task manager. Its home screen is a Kanban board with a
 - **Export / import** the board as JSON.
 - **Light & dark themes**. The app follows your system setting until you toggle it.
 - **Cross-tab sync**: changes in one tab show up in the others.
+- **Cloud sync when hosted on claude.ai**: when the page runs as a claude.ai artifact, the board is stored in the artifact's database, so it follows you across devices. Everywhere else it uses the browser's own storage.
 
 ### Keyboard shortcuts
 
@@ -37,6 +38,8 @@ npm start -- 8080  # or pick a port
 npm test           # runs the unit tests
 ```
 
+To get one self-contained file (inline CSS and JS) that opens straight from disk with no server, run `npm run build` and open `dist/taskflow.html`.
+
 The app is plain static files, so you can also host it with any static server (GitHub Pages, Netlify, `python3 -m http.server`, …). It uses ES modules, so it must be served over HTTP; opening `index.html` directly from disk won't work.
 
 On first launch the board is filled with sample tasks. You can clear them with **⋯ → Delete all tasks**, and bring them back with **⋯ → Load sample data**.
@@ -49,6 +52,7 @@ css/styles.css      Styles (light/dark themes, responsive layout)
 js/store.js         Pure state logic: tasks, columns, filters, stats, persistence
 js/app.js           UI: rendering, drag & drop, dialogs, shortcuts
 server.js           Zero-dependency static file server
+scripts/build.js    Bundles everything into a single HTML file
 tests/store.test.js Unit tests for the state logic (node:test)
 ```
 

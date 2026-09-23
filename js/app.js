@@ -42,7 +42,138 @@ function h(tag, props = {}, ...children) {
 function commit(next) {
   state = next;
   saveState(storage, state);
+  queueRemoteWrite();
   render();
+}
+
+// ---------- cloud sync ----------
+// When the page runs inside a host that provides a shared document store
+// (window.claude.use("db")), the board is kept in one document there so it
+// follows the user across devices. Otherwise localStorage is the only store.
+
+const claudeUse = (name) => (window.claude?.use
+  ? window.claude.use(name).catch(() => null)
+  : Promise.resolve(null));
+
+const sync = { ref: null, writing: false, pending: false, readOnly: false };
+
+function setSyncStatus(text, mode = '') {
+  const el = $('#sync-status');
+  el.textContent = text;
+  el.dataset.mode = mode;
+}
+
+function queueRemoteWrite() {
+  if (!sync.ref || sync.readOnly) return;
+  sync.pending = true;
+  if (!sync.writing) flushRemote();
+}
+
+// One write in flight at a time; a burst of edits collapses into a
+// single write of the latest state.
+async function flushRemote() {
+  sync.writing = true;
+  while (sync.pending) {
+    sync.pending = false;
+    setSyncStatus('Saving…', 'busy');
+    try {
+      await writeWithRetry(state);
+      setSyncStatus('Synced', 'ok');
+    } catch (err) {
+      if (err?.code === 'invalid_argument') {
+        sync.readOnly = true;
+        setSyncStatus('Saved in this browser only', 'warn');
+        toast('Changes can’t be saved to the shared board, so they stay in this browser.');
+      } else if (err?.code === 'revoked') {
+        sync.ref = null;
+        setSyncStatus('Saved in this browser', '');
+      } else {
+        setSyncStatus('Not synced, saved in this browser', 'warn');
+      }
+      break;
+    }
+  }
+  sync.writing = false;
+}
+
+async function writeWithRetry(data) {
+  try {
+    await sync.ref.set(data);
+  } catch (err) {
+    if (err?.code !== 'unavailable') throw err;
+    await new Promise((r) => setTimeout(r, 500 + Math.random() * 1000));
+    await sync.ref.set(data);
+  }
+}
+
+async function connectCloud() {
+  const db = await claudeUse('db');
+  if (!db) return;
+  setSyncStatus('Connecting…', 'busy');
+  sync.ref = db.doc('boards/main');
+  sync.ref.onSnapshot((snap) => {
+    if (!snap.exists) {
+      // First open: seed the shared board with what this browser has.
+      if (!snap.metadata.fromCache) queueRemoteWrite();
+      return;
+    }
+    if (snap.metadata.hasPendingWrites || sync.writing || sync.pending) return;
+    let incoming;
+    try {
+      incoming = normalizeState(snap.data());
+    } catch {
+      return;
+    }
+    setSyncStatus('Synced', 'ok');
+    if (JSON.stringify(incoming) === JSON.stringify(state) || drag.active) return;
+    state = incoming;
+    saveState(storage, state);
+    render();
+  }, () => {
+    sync.ref = null;
+    setSyncStatus('Not synced, saved in this browser', 'warn');
+  });
+}
+
+// ---------- in-page prompt / confirm ----------
+
+const askDialog = $('#ask-dialog');
+
+// ask({ title, value }) resolves the entered text (or null if cancelled);
+// ask({ title, message }) without a value resolves true/false.
+function ask({ title, message = '', value = null, okLabel = 'OK', danger = false, inputType = 'text' }) {
+  return new Promise((resolve) => {
+    const input = $('#ask-input');
+    const ok = $('#ask-ok');
+    const isPrompt = value !== null;
+    $('#ask-title').textContent = title;
+    $('#ask-message').textContent = message;
+    input.hidden = !isPrompt;
+    input.type = inputType;
+    input.value = isPrompt ? String(value) : '';
+    ok.textContent = okLabel;
+    ok.className = `btn ${danger ? 'btn-danger-solid' : 'btn-primary'}`;
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      if (askDialog.open) askDialog.close();
+      resolve(result);
+    };
+    $('#ask-form').onsubmit = (e) => {
+      e.preventDefault();
+      finish(isPrompt ? input.value : true);
+    };
+    $('#ask-cancel').onclick = () => finish(isPrompt ? null : false);
+    askDialog.onclose = () => finish(isPrompt ? null : false);
+    askDialog.showModal();
+    if (isPrompt) {
+      input.focus();
+      input.select();
+    } else {
+      ok.focus();
+    }
+  });
 }
 
 // ---------- rendering ----------
@@ -115,8 +246,27 @@ function renderFilters() {
 
 function renderBoard() {
   const scroll = boardEl.scrollLeft;
+  // Keep focus (and any half-typed quick-add text) across re-renders,
+  // which can be triggered by changes arriving from another device.
+  const active = document.activeElement;
+  const quick = active?.closest?.('.quick-add')
+    ? { column: active.closest('.column').dataset.column, value: active.value, pos: active.selectionStart }
+    : null;
+  const focusedCard = active?.classList?.contains('card') ? active.dataset.id : null;
+
   boardEl.replaceChildren(...state.columns.map(renderColumn), renderAddColumn());
   boardEl.scrollLeft = scroll;
+
+  if (quick) {
+    const input = boardEl.querySelector(`.column[data-column="${CSS.escape(quick.column)}"] .quick-add input`);
+    if (input) {
+      input.value = quick.value;
+      input.focus();
+      input.setSelectionRange(quick.pos, quick.pos);
+    }
+  } else if (focusedCard) {
+    boardEl.querySelector(`.card[data-id="${CSS.escape(focusedCard)}"]`)?.focus();
+  }
 }
 
 function renderColumn(column, index) {
@@ -265,9 +415,8 @@ function quickAdd(e, columnId) {
   const input = e.currentTarget.elements.title;
   const title = input.value.trim();
   if (!title) return;
+  input.value = '';
   commit(addTask(state, { title, status: columnId }));
-  // The board re-rendered; restore focus to this column's quick-add input.
-  boardEl.querySelector(`.column[data-column="${CSS.escape(columnId)}"] .quick-add input`)?.focus();
 }
 
 // Keyboard support for cards: Enter to edit, Delete to remove,
@@ -300,13 +449,13 @@ function onCardKey(e, task) {
 
 // ---------- columns ----------
 
-function promptAddColumn() {
-  const title = window.prompt('Column name');
+async function promptAddColumn() {
+  const title = await ask({ title: 'Add column', message: 'New columns are placed before Done.', value: '', okLabel: 'Add column' });
   if (title?.trim()) commit(addColumn(state, title));
 }
 
-function renameColumn(column) {
-  const title = window.prompt('Rename column', column.title);
+async function renameColumn(column) {
+  const title = await ask({ title: 'Rename column', value: column.title, okLabel: 'Rename' });
   if (title?.trim()) commit(updateColumn(state, column.id, { title }));
 }
 
@@ -314,17 +463,31 @@ function openColumnMenu(anchor, column) {
   closePopups();
   const items = [
     ['Rename', () => renameColumn(column)],
-    ['Set WIP limit…', () => {
-      const value = window.prompt('Maximum tasks in this column (0 = no limit)', String(column.wipLimit || 0));
+    ['Set WIP limit…', async () => {
+      const value = await ask({
+        title: `WIP limit for ${column.title}`,
+        message: 'Maximum number of tasks in this column. Use 0 for no limit.',
+        value: String(column.wipLimit || 0),
+        inputType: 'number',
+        okLabel: 'Save',
+      });
       if (value !== null) commit(updateColumn(state, column.id, { wipLimit: value }));
     }],
   ];
   if (column.id !== DONE_COLUMN_ID && state.columns.length > 1) {
-    items.push(['Delete column', () => {
+    items.push(['Delete column', async () => {
       const n = tasksInColumn(state, column.id).length;
       const fallback = state.columns.find((c) => c.id !== column.id).title;
-      const msg = n ? `Delete “${column.title}”? Its ${n} task(s) will move to “${fallback}”.` : `Delete “${column.title}”?`;
-      if (window.confirm(msg)) commit(deleteColumn(state, column.id));
+      const ok = await ask({
+        title: `Delete “${column.title}”?`,
+        message: n ? `Its ${n} task(s) will move to “${fallback}”.` : 'This column has no tasks.',
+        okLabel: 'Delete column',
+        danger: true,
+      });
+      if (!ok) return;
+      const before = state;
+      commit(deleteColumn(state, column.id));
+      toast(`Deleted column “${column.title}”`, { label: 'Undo', run: () => commit(before) });
     }, 'danger']);
   }
   const menu = h('div', { class: 'menu-list popup', role: 'menu' },
@@ -546,10 +709,22 @@ $('#menu-list').addEventListener('click', (e) => {
 
 const menuActions = {
   'add-column': promptAddColumn,
-  export() {
-    const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
+  async export() {
+    const json = JSON.stringify(state, null, 2);
+    const filename = `taskflow-board-${todayISO()}.json`;
+    const downloads = await claudeUse('downloads');
+    if (downloads) {
+      try {
+        await downloads.save({ filename, data: json });
+        toast('Board exported');
+      } catch (err) {
+        if (err?.code !== 'declined') toast(`Export failed: ${err?.message ?? 'unknown error'}`);
+      }
+      return;
+    }
+    const blob = new Blob([json], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
-    const link = h('a', { href: url, download: `taskflow-board-${todayISO()}.json` });
+    const link = h('a', { href: url, download: filename });
     document.body.append(link);
     link.click();
     link.remove();
@@ -558,8 +733,13 @@ const menuActions = {
   import() {
     $('#import-input').click();
   },
-  sample() {
-    if (state.tasks.length && !window.confirm('Replace the current board with sample data?')) return;
+  async sample() {
+    if (state.tasks.length && !await ask({
+      title: 'Load sample data?',
+      message: 'This replaces the tasks and columns on your board. You can undo it right after.',
+      okLabel: 'Replace board',
+      danger: true,
+    })) return;
     const before = state;
     commit(createSampleState());
     toast('Sample data loaded', { label: 'Undo', run: () => commit(before) });
@@ -571,8 +751,13 @@ const menuActions = {
     commit({ ...state, tasks: state.tasks.filter((t) => t.status !== DONE_COLUMN_ID) });
     toast(`Cleared ${n} completed task(s)`, { label: 'Undo', run: () => commit(before) });
   },
-  reset() {
-    if (!window.confirm('Delete all tasks and reset columns? This cannot be undone after you leave the page.')) return;
+  async reset() {
+    if (!await ask({
+      title: 'Delete all tasks?',
+      message: 'Every task is removed and the columns are reset. You can undo it right after.',
+      okLabel: 'Delete all',
+      danger: true,
+    })) return;
     const before = state;
     commit(createEmptyState());
     toast('Board cleared', { label: 'Undo', run: () => commit(before) });
@@ -607,7 +792,7 @@ $('#theme-btn').addEventListener('click', () => {
 // ---------- global shortcuts ----------
 
 document.addEventListener('keydown', (e) => {
-  if (dialog.open || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (dialog.open || askDialog.open || e.ctrlKey || e.metaKey || e.altKey) return;
   const typing = e.target.closest('input, textarea, select, [contenteditable]');
   if (e.key === 'Escape') closePopups();
   if (typing) return;
@@ -658,3 +843,4 @@ function toast(message, action) {
 
 saveState(storage, state);
 render();
+connectCloud();

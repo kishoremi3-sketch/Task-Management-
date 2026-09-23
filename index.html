@@ -22,6 +22,7 @@
       <span>TaskFlow</span>
     </div>
     <div class="topbar-actions">
+      <span class="sync" id="sync-status" title="Where your board is saved">Saved in this browser</span>
       <button class="btn btn-primary" id="new-task-btn" title="New task (N)">
         <span aria-hidden="true">+</span> New task
       </button>
@@ -118,6 +119,19 @@
         <span class="spacer"></span>
         <button type="button" class="btn btn-ghost" data-close>Cancel</button>
         <button type="submit" class="btn btn-primary" id="save-task-btn">Create task</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="ask-dialog" class="ask-dialog" aria-labelledby="ask-title">
+    <form id="ask-form" method="dialog">
+      <h2 id="ask-title"></h2>
+      <p id="ask-message" class="ask-message"></p>
+      <input id="ask-input" name="value" autocomplete="off" maxlength="80">
+      <footer class="dialog-footer">
+        <span class="spacer"></span>
+        <button type="button" class="btn btn-ghost" id="ask-cancel">Cancel</button>
+        <button type="submit" class="btn btn-primary" id="ask-ok">OK</button>
       </footer>
     </form>
   </dialog>
