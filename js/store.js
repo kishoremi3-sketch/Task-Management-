@@ -62,9 +62,10 @@ export function createSampleState(today = todayISO()) {
 
 // ---------- persistence ----------
 
-export function loadState(storage) {
+// `key` lets each signed-in user keep a separate board in the same browser.
+export function loadState(storage, key = STORAGE_KEY) {
   try {
-    const raw = storage?.getItem(STORAGE_KEY);
+    const raw = storage?.getItem(key);
     if (!raw) return null;
     return normalizeState(JSON.parse(raw));
   } catch {
@@ -72,9 +73,9 @@ export function loadState(storage) {
   }
 }
 
-export function saveState(storage, state) {
+export function saveState(storage, state, key = STORAGE_KEY) {
   try {
-    storage?.setItem(STORAGE_KEY, JSON.stringify(state));
+    storage?.setItem(key, JSON.stringify(state));
     return true;
   } catch {
     return false;

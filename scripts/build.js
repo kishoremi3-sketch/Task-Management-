@@ -11,21 +11,26 @@ import { fileURLToPath } from 'node:url';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (p) => readFile(join(root, p), 'utf8');
 
-const [html, css, store, app] = await Promise.all([
-  read('index.html'), read('css/styles.css'), read('js/store.js'), read('js/app.js'),
+// Modules in dependency order; each is turned into plain script code.
+const modules = ['js/store.js', 'js/auth-config.js', 'js/auth.js', 'js/app.js'];
+const [html, css, ...sources] = await Promise.all([
+  read('index.html'), read('css/styles.css'), ...modules.map(read),
 ]);
 
-// Turn the two ES modules into one classic script.
-const storeCode = store.replace(/^export /gm, '');
-const appCode = app.replace(/^import \{[\s\S]*?\} from '\.\/store\.js';\n/m, '');
-if (appCode === app) throw new Error('Could not strip the store import from app.js');
-const js = `(() => {\n'use strict';\n${storeCode}\n${appCode}\n})();`;
+const code = sources.map((src, i) => {
+  const out = src
+    .replace(/^import \{[\s\S]*?\} from '\.\/[\w-]+\.js';\n/gm, '')
+    .replace(/^export /gm, '');
+  if (/^(import|export) /m.test(out)) throw new Error(`Unsupported import/export left in ${modules[i]}`);
+  return `// ---- ${modules[i]} ----\n${out}`;
+}).join('\n');
+const js = `(() => {\n'use strict';\n${code}\n})();`;
 if (/<\/script/i.test(js)) throw new Error('Script contains a closing </script> tag');
 
 const page = html
   .replace('<link rel="stylesheet" href="css/styles.css">', () => `<style>\n${css}</style>`)
   .replace('<script type="module" src="js/app.js"></script>', () => `<script>\n${js}\n</script>`);
-if (page.includes('css/styles.css') || page.includes('js/app.js')) {
+if (page.includes('href="css/styles.css"') || page.includes('src="js/app.js"')) {
   throw new Error('Failed to inline assets; did index.html change?');
 }
 

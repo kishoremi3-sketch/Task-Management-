@@ -5,12 +5,18 @@ import {
   addTask, updateTask, deleteTask, moveTask, addColumn, updateColumn, deleteColumn, isOverWip,
   todayISO,
 } from './store.js';
+import { ssoProviders, signIn, signOut, handleRedirect, currentSession } from './auth.js';
 
 const storage = (() => {
   try { return window.localStorage; } catch { return null; }
 })();
 
-let state = loadState(storage) ?? createSampleState();
+let state = createEmptyState();
+// Who is signed in: { id, name, detail, avatarUrl, color, isOwner, canSignOut }
+// or null when the app runs without sign-in.
+let identity = null;
+// Each signed-in person gets their own browser copy of their board.
+let storageKey = STORAGE_KEY;
 let filter = { query: '', priority: '', assignee: '', tag: '', due: '' };
 let editingId = null;
 
@@ -41,7 +47,7 @@ function h(tag, props = {}, ...children) {
 
 function commit(next) {
   state = next;
-  saveState(storage, state);
+  saveState(storage, state, storageKey);
   queueRemoteWrite();
   render();
 }
@@ -106,15 +112,32 @@ async function writeWithRetry(data) {
   }
 }
 
+// Each person's board lives under their own data/users/<id>/ path, which
+// the store keeps private to them (not even the page's owner can read it).
 async function connectCloud() {
+  if (!identity) return;
   const db = await claudeUse('db');
   if (!db) return;
   setSyncStatus('Connecting…', 'busy');
-  sync.ref = db.doc('boards/main');
-  sync.ref.onSnapshot((snap) => {
+  sync.ref = db.doc(`data/users/${identity.id}/board`);
+  let seeded = false;
+  sync.ref.onSnapshot(async (snap) => {
     if (!snap.exists) {
-      // First open: seed the shared board with what this browser has.
-      if (!snap.metadata.fromCache) queueRemoteWrite();
+      if (snap.metadata.fromCache || seeded) return;
+      seeded = true;
+      // First visit. The owner's board used to be shared at boards/main:
+      // carry it over so their existing tasks aren't lost.
+      if (identity.isOwner && state.tasks.length === 0) {
+        try {
+          const legacy = await db.doc('boards/main').get();
+          if (legacy.exists) {
+            state = normalizeState(legacy.data());
+            saveState(storage, state, storageKey);
+            render();
+          }
+        } catch { /* nothing to migrate */ }
+      }
+      queueRemoteWrite();
       return;
     }
     if (snap.metadata.hasPendingWrites || sync.writing || sync.pending) return;
@@ -127,7 +150,7 @@ async function connectCloud() {
     setSyncStatus('Synced', 'ok');
     if (JSON.stringify(incoming) === JSON.stringify(state) || drag.active) return;
     state = incoming;
-    saveState(storage, state);
+    saveState(storage, state, storageKey);
     render();
   }, () => {
     sync.ref = null;
@@ -179,6 +202,11 @@ function ask({ title, message = '', value = null, okLabel = 'OK', danger = false
 // ---------- rendering ----------
 
 function render() {
+  const welcome = $('#welcome');
+  welcome.hidden = !(identity && state.tasks.length === 0);
+  if (!welcome.hidden) {
+    $('#welcome-title').textContent = `Welcome, ${identity.name.split(/\s+/)[0]}`;
+  }
   renderStats();
   renderFilters();
   renderBoard();
@@ -506,6 +534,8 @@ function closePopups() {
   document.querySelectorAll('.popup').forEach((p) => p.remove());
   $('#menu-list').hidden = true;
   $('#menu-btn').setAttribute('aria-expanded', 'false');
+  $('#account-menu').hidden = true;
+  $('#account-btn').setAttribute('aria-expanded', 'false');
 }
 
 document.addEventListener('click', (e) => {
@@ -792,6 +822,7 @@ $('#theme-btn').addEventListener('click', () => {
 // ---------- global shortcuts ----------
 
 document.addEventListener('keydown', (e) => {
+  if (document.body.dataset.view !== 'app') return;
   if (dialog.open || askDialog.open || e.ctrlKey || e.metaKey || e.altKey) return;
   const typing = e.target.closest('input, textarea, select, [contenteditable]');
   if (e.key === 'Escape') closePopups();
@@ -816,8 +847,8 @@ setInterval(() => {
 
 // Sync changes made in another tab.
 window.addEventListener('storage', (e) => {
-  if (e.storageArea !== storage || e.key !== STORAGE_KEY) return;
-  const next = loadState(storage);
+  if (e.storageArea !== storage || e.key !== storageKey) return;
+  const next = loadState(storage, storageKey);
   if (next && !drag.active) {
     state = next;
     render();
@@ -841,6 +872,117 @@ function toast(message, action) {
   toastTimer = setTimeout(() => el.classList.remove('show'), action ? 6000 : 2500);
 }
 
-saveState(storage, state);
-render();
-connectCloud();
+// ---------- account & start-up ----------
+
+function renderAccount() {
+  const account = $('#account');
+  account.hidden = !identity;
+  if (!identity) return;
+  const avatar = $('#account-avatar');
+  if (identity.avatarUrl) {
+    avatar.replaceChildren(h('img', { src: identity.avatarUrl, alt: '' }));
+  } else {
+    avatar.replaceChildren(initials(identity.name) || '?');
+  }
+  avatar.style.setProperty('--avatar-bg', identity.color || `hsl(${hue(identity.name)} 55% 45%)`);
+  $('#account-name').textContent = identity.name;
+  $('#account-btn').setAttribute('aria-label', `Account: ${identity.name}`);
+  $('#account-btn').title = identity.name;
+  $('#account-menu-name').textContent = identity.name;
+  $('#account-menu-detail').textContent = identity.detail;
+  $('#sign-out-btn').hidden = !identity.canSignOut;
+}
+
+$('#account-btn').addEventListener('click', (e) => {
+  e.stopPropagation();
+  const menu = $('#account-menu');
+  const open = menu.hidden;
+  closePopups();
+  menu.hidden = !open;
+  $('#account-btn').setAttribute('aria-expanded', String(open));
+});
+
+$('#sign-out-btn').addEventListener('click', () => signOut());
+
+$('#welcome-sample').addEventListener('click', () => commit(createSampleState()));
+
+function showSignIn(error = '') {
+  document.body.dataset.view = 'signin';
+  $('#signin-options').replaceChildren(...ssoProviders().map((p) => h('button', {
+    class: 'btn',
+    onclick: async (e) => {
+      const button = e.currentTarget;
+      button.disabled = true;
+      button.textContent = `Redirecting to ${p.label ?? p.id}…`;
+      try {
+        await signIn(p.id);
+      } catch (err) {
+        button.disabled = false;
+        button.textContent = `Continue with ${p.label ?? p.id}`;
+        showSignInError(err.message);
+      }
+    },
+  }, `Continue with ${p.label ?? p.id}`)));
+  showSignInError(error);
+}
+
+function showSignInError(message) {
+  const el = $('#signin-error');
+  el.textContent = message;
+  el.hidden = !message;
+}
+
+// Works out who is using the app, then loads that person's board.
+// - Hosted on claude.ai: the viewer's claude.ai account (their company SSO
+//   when their organization uses one). Boards sync through the page's db.
+// - Self-hosted with SSO_PROVIDERS configured: OpenID Connect sign-in.
+// - Otherwise: no sign-in, one board per browser.
+async function boot() {
+  const hosted = Boolean(window.claude?.use);
+  if (!hosted && ssoProviders().length) {
+    let session;
+    try {
+      session = (await handleRedirect()) ?? currentSession();
+    } catch (err) {
+      showSignIn(err.message);
+      return;
+    }
+    if (!session) {
+      showSignIn();
+      return;
+    }
+    identity = {
+      id: `${session.providerId}:${session.sub}`,
+      name: session.name,
+      detail: [session.email, `Signed in with ${session.providerLabel}`].filter(Boolean).join(' · '),
+      avatarUrl: null,
+      color: null,
+      isOwner: false,
+      canSignOut: true,
+    };
+  } else if (hosted) {
+    const user = await claudeUse('user');
+    const me = user ? await user.me() : null;
+    if (me?.id) {
+      identity = {
+        id: me.id,
+        name: me.name || 'You',
+        detail: 'Signed in with your Claude account',
+        avatarUrl: me.avatarUrl,
+        color: me.color,
+        isOwner: me.isOwner,
+        canSignOut: false,
+      };
+    }
+  }
+
+  storageKey = identity ? `${STORAGE_KEY}:${identity.id}` : STORAGE_KEY;
+  state = loadState(storage, storageKey) ?? (identity ? createEmptyState() : createSampleState());
+  saveState(storage, state, storageKey);
+  document.body.dataset.view = 'app';
+  renderAccount();
+  render();
+  if (hosted) connectCloud();
+}
+
+boot();

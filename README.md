@@ -13,7 +13,8 @@ TaskFlow is a lightweight task manager. Its home screen is a Kanban board with a
 - **Export / import** the board as JSON.
 - **Light & dark themes**. The app follows your system setting until you toggle it.
 - **Cross-tab sync**: changes in one tab show up in the others.
-- **Cloud sync when hosted on claude.ai**: when the page runs as a claude.ai artifact, the board is stored in the artifact's database, so it follows you across devices. Everywhere else it uses the browser's own storage.
+- **Sign-in and personal boards**: each person signs in and sees only their own tasks. Their name and avatar appear in the top bar (see [Sign-in](#sign-in)).
+- **Cloud sync when hosted on claude.ai**: when the page runs as a claude.ai artifact, each person's board is stored privately in the artifact's database, so it follows them across devices. Everywhere else it uses the browser's own storage.
 
 ### Keyboard shortcuts
 
@@ -44,16 +45,38 @@ The app is plain static files, so you can also host it with any static server (G
 
 On first launch the board is filled with sample tasks. You can clear them with **⋯ → Delete all tasks**, and bring them back with **⋯ → Load sample data**.
 
+## Sign-in
+
+TaskFlow chooses how people sign in based on where it runs:
+
+| Where it runs | How people sign in | Where each person's board is kept |
+| --- | --- | --- |
+| claude.ai artifact | Their claude.ai account, which uses your company SSO if your organization has it set up | The artifact's database, under a path only that person can read |
+| Self-hosted, SSO configured | "Continue with …" buttons (OpenID Connect) | That browser, separately for each account |
+| Self-hosted, no SSO configured | No sign-in | That browser |
+
+### Setting up SSO for a self-hosted copy
+
+1. In your identity provider (Microsoft Entra ID, Okta, Auth0, Keycloak, or any OpenID Connect provider), register a **single-page application**: a public client using the authorization code flow with PKCE and no client secret.
+2. Add the exact URL you serve TaskFlow from as a redirect URI, e.g. `https://tasks.example.com/` (and `http://localhost:3000/` for local testing). Add the same URL as a post-logout redirect URI.
+3. Add the provider to `SSO_PROVIDERS` in `js/auth-config.js`. The file has ready-to-fill examples for each provider. You can list several providers; each gets its own button.
+
+Google can't be used directly: its token endpoint requires a client secret, which a browser-only app can't keep. Connect Google Workspace through Auth0, Okta or Keycloak instead.
+
+**Security note:** in a self-hosted copy, sign-in decides *which* board is shown, but boards are still stored in the browser. The ID token's issuer, audience, nonce and expiry are checked, but its signature is not verified in the browser. If you need boards stored on a server and protected there, add a backend that verifies tokens. The claude.ai-hosted version doesn't have this limitation: its database enforces that people can only read their own board.
+
 ## Project structure
 
 ```
 index.html          App shell, task dialog
 css/styles.css      Styles (light/dark themes, responsive layout)
 js/store.js         Pure state logic: tasks, columns, filters, stats, persistence
-js/app.js           UI: rendering, drag & drop, dialogs, shortcuts
+js/app.js           UI: rendering, drag & drop, dialogs, shortcuts, start-up
+js/auth.js          OpenID Connect sign-in (authorization code + PKCE)
+js/auth-config.js   SSO provider settings (empty = no sign-in)
 server.js           Zero-dependency static file server
 scripts/build.js    Bundles everything into a single HTML file
-tests/store.test.js Unit tests for the state logic (node:test)
+tests/*.test.js     Unit tests for the state logic and sign-in checks (node:test)
 ```
 
 `js/store.js` has no DOM access. Every mutation returns a new state object, which keeps the logic easy to test and makes undo simple.

@@ -38,8 +38,34 @@
         </div>
       </div>
       <button class="btn btn-ghost icon-btn" id="theme-btn" aria-label="Toggle dark mode" title="Toggle theme">◐</button>
+      <div class="menu account" id="account" hidden>
+        <button class="account-btn" id="account-btn" aria-haspopup="true" aria-expanded="false">
+          <span class="account-avatar" id="account-avatar" aria-hidden="true"></span>
+          <span class="account-name" id="account-name"></span>
+        </button>
+        <div class="menu-list account-menu" id="account-menu" role="menu" hidden>
+          <div class="account-card">
+            <strong id="account-menu-name"></strong>
+            <span id="account-menu-detail"></span>
+            <span class="account-note">Only you can see the tasks on your board.</span>
+          </div>
+          <button role="menuitem" id="sign-out-btn" hidden>Sign out</button>
+        </div>
+      </div>
     </div>
   </header>
+
+  <div class="boot" id="boot" role="status">Loading your board…</div>
+
+  <section class="signin" id="signin" aria-labelledby="signin-title">
+    <div class="signin-card">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="currentColor"/><rect x="6" y="7" width="5" height="18" rx="1.5" fill="#fff"/><rect x="13.5" y="7" width="5" height="12" rx="1.5" fill="#fff"/><rect x="21" y="7" width="5" height="8" rx="1.5" fill="#fff"/></svg>
+      <h1 id="signin-title">Sign in to TaskFlow</h1>
+      <p>Use your work account. Your board is private: only you see your tasks.</p>
+      <div class="signin-options" id="signin-options"></div>
+      <p class="signin-error" id="signin-error" role="alert" hidden></p>
+    </div>
+  </section>
 
   <main>
     <section class="stats" id="stats" aria-label="Board summary"></section>
@@ -64,6 +90,14 @@
         <option value="none">No due date</option>
       </select>
       <button class="btn btn-ghost" id="clear-filters" hidden>Clear filters</button>
+    </section>
+
+    <section class="welcome" id="welcome" hidden>
+      <div>
+        <strong id="welcome-title">Welcome</strong>
+        <p>This is your personal board, and only you can see it. Add your first task with <b>New task</b> or the <b>+</b> on any column.</p>
+      </div>
+      <button class="btn" id="welcome-sample">Load sample tasks</button>
     </section>
 
     <section class="board" id="board" aria-label="Kanban board"></section>
