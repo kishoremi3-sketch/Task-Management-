@@ -1,5 +1,5 @@
 import {
-  PRIORITIES, DONE_COLUMN_ID,
+  PRIORITIES, DONE_COLUMN_ID, TASK_TYPES, TASK_TYPE_LABELS,
   createEmptyState, createSampleState, normalizeState, normalizeTags,
   tasksInColumn, getTask, isOverdue, isDueSoon, allTags, matchesFilter, getStats,
   assigneeKey, allAssigneeKeys, workload,
@@ -36,7 +36,7 @@ let canManageTeams = false;
 let userApi = null;
 const people = new Map(); // account id -> { name, avatarUrl, color }
 
-const EMPTY_FILTER = { query: '', priority: '', assignee: '', tag: '', due: '' };
+const EMPTY_FILTER = { query: '', priority: '', type: '', assignee: '', tag: '', due: '' };
 let filter = { ...EMPTY_FILTER };
 let editingId = null;
 
@@ -202,6 +202,7 @@ function selectTeam(id) {
   filter = { ...EMPTY_FILTER };
   $('#search').value = '';
   $('#filter-priority').value = '';
+  $('#filter-type').value = '';
   $('#filter-due').value = '';
   if (id) {
     try { localStorage.setItem(TEAM_PREF_KEY, id); } catch { /* ignore */ }
@@ -550,7 +551,15 @@ function renderStats() {
         h('i', { class: `dot seg-${i % 6}` }), `${c.title} ${s.byColumn[c.id] ?? 0}`))));
 
   statsEl.replaceChildren(
-    tile('Open tasks', s.open, `${inProgress} in progress`),
+    h('div', { class: 'stat' },
+      h('div', { class: 'stat-label' }, 'Open tasks'),
+      h('div', { class: 'stat-value' }, s.open),
+      h('div', { class: 'stat-sub' }, `${inProgress} in progress`),
+      h('div', { class: 'type-counts' },
+        TASK_TYPES.map((type) => h('span', {
+          class: `type-${type}`,
+          title: `Open ${TASK_TYPE_LABELS[type].toLowerCase()} tasks`,
+        }, `${s.byType[type]} ${TASK_TYPE_LABELS[type].toLowerCase()}${s.byType[type] === 1 ? '' : 's'}`)))),
     tile('Overdue', s.overdue, s.overdue ? 'needs attention' : 'all on track', s.overdue ? 'stat-alert' : ''),
     tile('Due soon', s.dueSoon, 'next 2 days', s.dueSoon ? 'stat-warn' : ''),
     progress,
@@ -684,11 +693,13 @@ function renderCard(task) {
     class: `card priority-${task.priority}${done ? ' is-done' : ''}`,
     tabindex: 0,
     dataset: { id: task.id },
-    'aria-label': `${task.title}, ${task.priority} priority, ${assigneeKey(task) ? `assigned to ${personFor(assigneeKey(task)).name}` : 'unassigned'}`,
+    'aria-label': `${task.title}, ${task.type ? `${TASK_TYPE_LABELS[task.type]}, ` : ''}${task.priority} priority, ${assigneeKey(task) ? `assigned to ${personFor(assigneeKey(task)).name}` : 'unassigned'}`,
     onkeydown: (e) => onCardKey(e, task),
   },
   h('div', { class: 'card-top' },
-    h('span', { class: `badge badge-${task.priority}` }, task.priority),
+    h('span', { class: 'card-badges' },
+      task.type ? h('span', { class: `type-badge type-${task.type}` }, TASK_TYPE_LABELS[task.type]) : null,
+      h('span', { class: `badge badge-${task.priority}` }, task.priority)),
     task.dueDate ? h('span', {
       class: `due${overdue ? ' due-overdue' : soon ? ' due-soon' : ''}`,
       title: overdue ? 'Overdue' : 'Due date',
@@ -746,6 +757,9 @@ function openTaskDialog(id = null, columnId = null) {
   form.description.value = task?.description ?? '';
   form.status.value = task?.status ?? columnId ?? state.columns[0].id;
   form.priority.value = task?.priority ?? 'medium';
+  // Set each radio directly: assigning '' to the group's value doesn't
+  // select the "None" option.
+  for (const radio of form.type) radio.checked = radio.value === (task?.type ?? '');
   form.dueDate.value = task?.dueDate ?? '';
   draftAssignee = task?.assigneeId ? { id: task.assigneeId } : task?.assignee ? { name: task.assignee } : null;
   $('#assignee-input').value = '';
@@ -771,6 +785,7 @@ form.addEventListener('submit', (e) => {
     description: form.description.value.trim(),
     status: form.status.value,
     priority: PRIORITIES.includes(form.priority.value) ? form.priority.value : 'medium',
+    type: TASK_TYPES.includes(form.type.value) ? form.type.value : '',
     dueDate: form.dueDate.value,
     tags: normalizeTags(form.tags.value),
   };
@@ -1208,7 +1223,7 @@ $('#search').addEventListener('input', (e) => {
   render();
 });
 
-for (const key of ['priority', 'assignee', 'tag', 'due']) {
+for (const key of ['priority', 'type', 'assignee', 'tag', 'due']) {
   $(`#filter-${key}`).addEventListener('change', (e) => {
     filter[key] = e.target.value;
     render();
@@ -1216,9 +1231,10 @@ for (const key of ['priority', 'assignee', 'tag', 'due']) {
 }
 
 $('#clear-filters').addEventListener('click', () => {
-  filter = { query: '', priority: '', assignee: '', tag: '', due: '' };
+  filter = { ...EMPTY_FILTER };
   $('#search').value = '';
   $('#filter-priority').value = '';
+  $('#filter-type').value = '';
   $('#filter-due').value = '';
   render();
 });

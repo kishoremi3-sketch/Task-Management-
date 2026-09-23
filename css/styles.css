@@ -18,6 +18,9 @@
   --p-medium: #2563eb;
   --p-high: #ea580c;
   --p-urgent: #dc2626;
+  --t-project: #6d28d9;
+  --t-enhancement: #0f766e;
+  --t-defect: #be123c;
   --a0: #64748b;
   --a1: #6366f1;
   --a2: #f59e0b;
@@ -51,6 +54,9 @@
     --p-medium: #60a5fa;
     --p-high: #fb923c;
     --p-urgent: #f87171;
+    --t-project: #c4b5fd;
+    --t-enhancement: #5eead4;
+    --t-defect: #fda4af;
     --tag-l: 22%;
     --tag-text-l: 82%;
     color-scheme: dark;
@@ -77,6 +83,9 @@
   --p-medium: #60a5fa;
   --p-high: #fb923c;
   --p-urgent: #f87171;
+  --t-project: #c4b5fd;
+  --t-enhancement: #5eead4;
+  --t-defect: #fda4af;
   --tag-l: 22%;
   --tag-text-l: 82%;
   color-scheme: dark;
@@ -741,6 +750,51 @@ body:not([data-view="signin"]) .signin { display: none; }
 .badge-medium { --prio: var(--p-medium); }
 .badge-high { --prio: var(--p-high); }
 .badge-urgent { --prio: var(--p-urgent); }
+
+.card-badges { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+
+.type-badge {
+  padding: 1px 7px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .02em;
+  color: var(--type);
+  background: color-mix(in srgb, var(--type) 13%, transparent);
+  white-space: nowrap;
+}
+
+.type-project { --type: var(--t-project); }
+.type-enhancement { --type: var(--t-enhancement); }
+.type-defect { --type: var(--t-defect); }
+
+.type-field { margin: 0; padding: 0; border: none; }
+.type-field legend { padding: 0; margin-bottom: 4px; font-size: 12px; font-weight: 600; color: var(--muted); }
+.type-options { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.type-options label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--type, var(--muted));
+  cursor: pointer;
+}
+
+.type-options input { margin: 0; accent-color: var(--type, var(--primary)); }
+.type-options label:has(input:checked) {
+  border-color: var(--type, var(--muted));
+  background: color-mix(in srgb, var(--type, var(--muted)) 12%, var(--surface));
+}
+.type-options label:has(input:focus-visible) { outline: 2px solid var(--primary); outline-offset: 2px; }
+
+.type-counts { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 2px; font-size: 12px; }
+.type-counts span { color: var(--type); font-weight: 600; }
 
 .due { font-size: 12px; color: var(--muted); white-space: nowrap; }
 .due::before { content: "◷ "; }

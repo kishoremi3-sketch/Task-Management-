@@ -209,3 +209,23 @@ test('save and load round-trip through storage', () => {
   assert.equal(loadState(storage), null);
   assert.equal(loadState(null), null);
 });
+
+test('task types: validated, filterable, searchable and counted', () => {
+  let s = board(
+    ['todo', 'Crash on save', { type: 'defect' }],
+    ['todo', 'Dark mode', { type: 'enhancement' }],
+    ['todo', 'Website relaunch', { type: 'project' }],
+    ['done', 'Old crash', { type: 'defect' }],
+    ['todo', 'Misc', { type: 'bogus' }],
+  );
+  const byTitle = (t) => s.tasks.find((x) => x.title === t);
+  assert.equal(byTitle('Misc').type, '', 'unknown types are dropped');
+  const today = '2026-09-23';
+  const titles = (f) => s.tasks.filter((t) => matchesFilter(t, f, today)).map((t) => t.title).sort();
+  assert.deepEqual(titles({ type: 'defect' }), ['Crash on save', 'Old crash']);
+  assert.deepEqual(titles({ type: 'none' }), ['Misc']);
+  assert.deepEqual(titles({ query: 'enhancement' }), ['Dark mode']);
+  assert.deepEqual(getStats(s, today).byType, { project: 1, enhancement: 1, defect: 1 }, 'open tasks only');
+  s = updateTask(s, byTitle('Misc').id, { type: 'project' });
+  assert.equal(byTitle('Misc').type, 'project');
+});

@@ -5,6 +5,10 @@ export const STORAGE_KEY = 'taskflow.board.v1';
 
 export const PRIORITIES = ['low', 'medium', 'high', 'urgent'];
 
+// A task's type; '' means no type.
+export const TASK_TYPES = ['project', 'enhancement', 'defect'];
+export const TASK_TYPE_LABELS = { project: 'Project', enhancement: 'Enhancement', defect: 'Defect' };
+
 export const DEFAULT_COLUMNS = [
   { id: 'backlog', title: 'Backlog', wipLimit: 0 },
   { id: 'todo', title: 'To Do', wipLimit: 0 },
@@ -42,18 +46,18 @@ export function createEmptyState() {
 export function createSampleState(today = todayISO()) {
   let state = createEmptyState();
   const samples = [
-    ['backlog', 'Research competitor pricing', 'Collect pricing pages for the top 5 competitors.', 'low', 12, ['research'], 'Alex'],
-    ['backlog', 'Plan Q4 roadmap', '', 'medium', 20, ['planning'], ''],
-    ['todo', 'Write onboarding email copy', 'Three-email sequence for new sign-ups.', 'medium', 4, ['marketing'], 'Sam'],
-    ['todo', 'Fix login redirect bug', 'Users land on /404 after logging in from a deep link.', 'urgent', -1, ['bug', 'frontend'], 'Jordan'],
-    ['in-progress', 'Design settings page', 'Include profile, notifications and billing tabs.', 'high', 2, ['design'], 'Taylor'],
-    ['in-progress', 'Set up CI pipeline', 'Run lint and tests on every pull request.', 'medium', 5, ['devops'], 'Jordan'],
-    ['review', 'API rate limiting', 'Token bucket, 100 req/min per key.', 'high', 1, ['backend'], 'Alex'],
-    ['done', 'Create project repository', '', 'low', -3, ['devops'], 'Sam'],
+    ['backlog', 'Research competitor pricing', 'Collect pricing pages for the top 5 competitors.', 'low', 12, ['research'], 'Alex', 'project'],
+    ['backlog', 'Plan Q4 roadmap', '', 'medium', 20, ['planning'], '', 'project'],
+    ['todo', 'Write onboarding email copy', 'Three-email sequence for new sign-ups.', 'medium', 4, ['marketing'], 'Sam', 'enhancement'],
+    ['todo', 'Fix login redirect bug', 'Users land on /404 after logging in from a deep link.', 'urgent', -1, ['frontend'], 'Jordan', 'defect'],
+    ['in-progress', 'Design settings page', 'Include profile, notifications and billing tabs.', 'high', 2, ['design'], 'Taylor', 'enhancement'],
+    ['in-progress', 'Set up CI pipeline', 'Run lint and tests on every pull request.', 'medium', 5, ['devops'], 'Jordan', 'project'],
+    ['review', 'API rate limiting', 'Token bucket, 100 req/min per key.', 'high', 1, ['backend'], 'Alex', 'enhancement'],
+    ['done', 'Create project repository', '', 'low', -3, ['devops'], 'Sam', 'project'],
   ];
-  for (const [status, title, description, priority, dueOffset, tags, assignee] of samples) {
+  for (const [status, title, description, priority, dueOffset, tags, assignee, type] of samples) {
     state = addTask(state, {
-      status, title, description, priority, tags, assignee,
+      status, title, description, priority, tags, assignee, type,
       dueDate: addDays(today, dueOffset),
     });
   }
@@ -112,6 +116,7 @@ function normalizeTask(t, status) {
     description: String(t.description ?? ''),
     status,
     priority: PRIORITIES.includes(t.priority) ? t.priority : 'medium',
+    type: TASK_TYPES.includes(t.type) ? t.type : '',
     dueDate: /^\d{4}-\d{2}-\d{2}$/.test(t.dueDate ?? '') ? t.dueDate : '',
     tags: normalizeTags(t.tags),
     // assigneeId is a person's account id (hosted on claude.ai); assignee
@@ -204,9 +209,11 @@ export function workload(state) {
 // people.meKeys lists the keys that mean "me"; people.nameOf(task) gives
 // the assignee's display name so search can match it.
 export function matchesFilter(task, filter = {}, today = todayISO(), people = {}) {
-  const { query = '', priority = '', tag = '', assignee = '', due = '' } = filter;
+  const { query = '', priority = '', type = '', tag = '', assignee = '', due = '' } = filter;
   const { meKeys = [], nameOf = (t) => t.assignee } = people;
   if (priority && task.priority !== priority) return false;
+  if (type === 'none' && task.type) return false;
+  if (type && type !== 'none' && task.type !== type) return false;
   if (tag && !task.tags.includes(tag)) return false;
   const key = assigneeKey(task);
   if (assignee === 'none' && key) return false;
@@ -217,7 +224,8 @@ export function matchesFilter(task, filter = {}, today = todayISO(), people = {}
   if (due === 'none' && task.dueDate) return false;
   const q = query.trim().toLowerCase();
   if (q) {
-    const haystack = [task.title, task.description, nameOf(task), ...task.tags].join(' ').toLowerCase();
+    const haystack = [task.title, task.description, nameOf(task), TASK_TYPE_LABELS[task.type] ?? '', ...task.tags]
+      .join(' ').toLowerCase();
     if (!haystack.includes(q)) return false;
   }
   return true;
@@ -231,6 +239,9 @@ export function getStats(state, today = todayISO()) {
   const byColumn = Object.fromEntries(
     state.columns.map((c) => [c.id, state.tasks.filter((t) => t.status === c.id).length]),
   );
+  const byType = Object.fromEntries(
+    TASK_TYPES.map((k) => [k, state.tasks.filter((t) => t.type === k && t.status !== DONE_COLUMN_ID).length]),
+  );
   const byPriority = Object.fromEntries(
     PRIORITIES.map((p) => [p, state.tasks.filter((t) => t.priority === p && t.status !== DONE_COLUMN_ID).length]),
   );
@@ -243,6 +254,7 @@ export function getStats(state, today = todayISO()) {
     completion: total ? Math.round((done / total) * 100) : 0,
     byColumn,
     byPriority,
+    byType,
   };
 }
 

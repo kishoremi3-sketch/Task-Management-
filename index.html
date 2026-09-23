@@ -90,6 +90,13 @@
         <option value="medium">Medium</option>
         <option value="low">Low</option>
       </select>
+      <select id="filter-type" aria-label="Filter by type">
+        <option value="">All types</option>
+        <option value="project">Project</option>
+        <option value="enhancement">Enhancement</option>
+        <option value="defect">Defect</option>
+        <option value="none">No type</option>
+      </select>
       <select id="filter-assignee" aria-label="Filter by person"></select>
       <select id="filter-tag" aria-label="Filter by tag"></select>
       <select id="filter-due" aria-label="Filter by due date">
@@ -159,9 +166,20 @@
           <button type="button" class="link-btn" id="assign-me" hidden>Assign to me</button>
         </div>
       </div>
+      <div class="field-row">
+        <fieldset class="field type-field">
+          <legend>Type</legend>
+          <div class="type-options">
+            <label><input type="radio" name="type" value=""> None</label>
+            <label class="type-project"><input type="radio" name="type" value="project"> Project</label>
+            <label class="type-enhancement"><input type="radio" name="type" value="enhancement"> Enhancement</label>
+            <label class="type-defect"><input type="radio" name="type" value="defect"> Defect</label>
+          </div>
+        </fieldset>
+      </div>
       <label class="field">
         <span>Tags <small>(comma separated)</small></span>
-        <input name="tags" autocomplete="off" placeholder="e.g. bug, frontend">
+        <input name="tags" autocomplete="off" placeholder="e.g. frontend, q4">
       </label>
       <p class="meta" id="task-meta"></p>
       <footer class="dialog-footer">

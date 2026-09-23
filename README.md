@@ -7,7 +7,7 @@ TaskFlow is a lightweight task manager. Its home screen is a Kanban board with a
 - **Dashboard summary**: open tasks, in-progress count, overdue and due-soon alerts, a completion progress bar, and a workflow breakdown by column.
 - **Kanban board**: Backlog → To Do → In Progress → Review → Done. You can add, rename, and delete columns, and set WIP limits (a column is highlighted when it goes over its limit).
 - **Drag & drop**: move cards within and across columns with a mouse, pen, or touch (long-press on mobile). The board auto-scrolls near the edges.
-- **Tasks**: title, description, status, priority (low/medium/high/urgent), due date, assignee, and tags. There's a full edit dialog, plus quick-add at the bottom of every column.
+- **Tasks**: title, description, status, priority (low/medium/high/urgent), type, due date, assignee, and tags. There's a full edit dialog, plus quick-add at the bottom of every column.
 - **Search & filters**: free-text search plus filters for priority, assignee, tag, and due date (overdue / due soon / none).
 - **Undo** for deletes, clears, imports, and resets.
 - **Export / import** the board as JSON.
@@ -15,6 +15,7 @@ TaskFlow is a lightweight task manager. Its home screen is a Kanban board with a
 - **Cross-tab sync**: changes in one tab show up in the others.
 - **Teams**: create as many teams as you need. Each has its own shared board; switch between them with the tabs above the dashboard.
 - **Team members** (hosted on claude.ai): add people to each team. Each person only sees the tabs and tasks of their own teams; people who can edit the page see every team so they can manage them. This controls what the page shows, not who can read the data: anyone with access to the page could still read other teams' tasks with developer tools.
+- **Task types**: mark a task as a **Project**, **Enhancement** or **Defect**. Each type has its own coloured label on the card, a filter, and open counts on the dashboard.
 - **Assignees**: assign tasks to people (hosted on claude.ai: search your organization by name; elsewhere: type a name). Every card shows who owns it, "Open tasks by person" shows each person's workload (click a person to filter), and there's an "Assigned to me" filter.
 - **Sign-in**: people sign in and their name and avatar appear in the top bar (see [Sign-in](#sign-in)).
 - **Cloud sync when hosted on claude.ai**: teams and boards are stored in the artifact's database and shared live with everyone who has access. Everywhere else they're kept in the browser.
