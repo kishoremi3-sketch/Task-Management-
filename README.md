@@ -13,8 +13,10 @@ TaskFlow is a lightweight task manager. Its home screen is a Kanban board with a
 - **Export / import** the board as JSON.
 - **Light & dark themes**. The app follows your system setting until you toggle it.
 - **Cross-tab sync**: changes in one tab show up in the others.
-- **Sign-in and personal boards**: each person signs in and sees only their own tasks. Their name and avatar appear in the top bar (see [Sign-in](#sign-in)).
-- **Cloud sync when hosted on claude.ai**: when the page runs as a claude.ai artifact, each person's board is stored privately in the artifact's database, so it follows them across devices. Everywhere else it uses the browser's own storage.
+- **Teams**: create as many teams as you need. Each has its own shared board; switch between them with the tabs above the dashboard.
+- **Assignees**: assign tasks to people (hosted on claude.ai: search your organization by name; elsewhere: type a name). Every card shows who owns it, "Open tasks by person" shows each person's workload (click a person to filter), and there's an "Assigned to me" filter.
+- **Sign-in**: people sign in and their name and avatar appear in the top bar (see [Sign-in](#sign-in)).
+- **Cloud sync when hosted on claude.ai**: teams and boards are stored in the artifact's database and shared live with everyone who has access. Everywhere else they're kept in the browser.
 
 ### Keyboard shortcuts
 
@@ -49,11 +51,11 @@ On first launch the board is filled with sample tasks. You can clear them with *
 
 TaskFlow chooses how people sign in based on where it runs:
 
-| Where it runs | How people sign in | Where each person's board is kept |
-| --- | --- | --- |
-| claude.ai artifact | Their claude.ai account, which uses your company SSO if your organization has it set up | The artifact's database, under a path only that person can read |
-| Self-hosted, SSO configured | "Continue with …" buttons (OpenID Connect) | That browser, separately for each account |
-| Self-hosted, no SSO configured | No sign-in | That browser |
+| Where it runs | How people sign in | Where teams and boards are kept | Who manages teams |
+| --- | --- | --- | --- |
+| claude.ai artifact | Their claude.ai account, which uses your company SSO if your organization has it set up | The artifact's database, shared with everyone who has access | The owner and people with edit access |
+| Self-hosted, SSO configured | "Continue with …" buttons (OpenID Connect) | That browser | Anyone signed in |
+| Self-hosted, no SSO configured | No sign-in | That browser | Anyone |
 
 ### Setting up SSO for a self-hosted copy
 
@@ -63,7 +65,7 @@ TaskFlow chooses how people sign in based on where it runs:
 
 Google can't be used directly: its token endpoint requires a client secret, which a browser-only app can't keep. Connect Google Workspace through Auth0, Okta or Keycloak instead.
 
-**Security note:** in a self-hosted copy, sign-in decides *which* board is shown, but boards are still stored in the browser. The ID token's issuer, audience, nonce and expiry are checked, but its signature is not verified in the browser. If you need boards stored on a server and protected there, add a backend that verifies tokens. The claude.ai-hosted version doesn't have this limitation: its database enforces that people can only read their own board.
+**Security note:** a self-hosted copy stores teams and boards in the browser, so sign-in only identifies people (their name, and "Assign to me"); it doesn't share boards between computers. The ID token's issuer, audience, nonce and expiry are checked, but its signature is not verified in the browser. For shared team boards in a self-hosted setup, add a backend that verifies tokens and stores the boards. The claude.ai-hosted version already shares boards through its database, which only lets the owner and editors change the team list.
 
 ## Project structure
 
@@ -73,6 +75,7 @@ css/styles.css      Styles (light/dark themes, responsive layout)
 js/store.js         Pure state logic: tasks, columns, filters, stats, persistence
 js/app.js           UI: rendering, drag & drop, dialogs, shortcuts, start-up
 js/auth.js          OpenID Connect sign-in (authorization code + PKCE)
+js/backend.js       Where teams and boards are stored: browser or shared database
 js/auth-config.js   SSO provider settings (empty = no sign-in)
 server.js           Zero-dependency static file server
 scripts/build.js    Bundles everything into a single HTML file

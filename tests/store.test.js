@@ -4,7 +4,7 @@ import {
   createEmptyState, createSampleState, addTask, updateTask, deleteTask, moveTask,
   tasksInColumn, getTask, isOverdue, isDueSoon, matchesFilter, getStats,
   addColumn, updateColumn, deleteColumn, isOverWip, normalizeState, normalizeTags,
-  loadState, saveState, STORAGE_KEY,
+  loadState, saveState, STORAGE_KEY, assigneeKey, allAssigneeKeys, workload,
 } from '../js/store.js';
 
 const titles = (state, col) => tasksInColumn(state, col).map((t) => t.title);
@@ -108,8 +108,36 @@ test('matchesFilter combines query, priority, tag, assignee and due', () => {
   assert.equal(matchesFilter(task, { query: 'sam' }, today), true);
   assert.equal(matchesFilter(task, { query: 'nope' }, today), false);
   assert.equal(matchesFilter(task, { priority: 'low' }, today), false);
-  assert.equal(matchesFilter(task, { tag: 'bug', assignee: 'Sam', due: 'overdue' }, today), true);
+  assert.equal(matchesFilter(task, { tag: 'bug', assignee: 'name:Sam', due: 'overdue' }, today), true);
   assert.equal(matchesFilter(task, { due: 'none' }, today), false);
+});
+
+test('assignee filters understand accounts, names, me and unassigned', () => {
+  const today = '2026-09-23';
+  const base = { title: 'T', description: '', status: 'todo', priority: 'low', tags: [], dueDate: '' };
+  const byId = { ...base, assigneeId: 'u_1', assignee: '' };
+  const byName = { ...base, assigneeId: '', assignee: 'Sam' };
+  const nobody = { ...base, assigneeId: '', assignee: '' };
+  assert.equal(assigneeKey(byId), 'id:u_1');
+  assert.equal(assigneeKey(byName), 'name:Sam');
+  assert.equal(assigneeKey(nobody), '');
+  const people = { meKeys: ['id:u_1'], nameOf: (t) => (t.assigneeId === 'u_1' ? 'Priya Shah' : t.assignee) };
+  assert.equal(matchesFilter(byId, { assignee: 'me' }, today, people), true);
+  assert.equal(matchesFilter(byName, { assignee: 'me' }, today, people), false);
+  assert.equal(matchesFilter(nobody, { assignee: 'none' }, today, people), true);
+  assert.equal(matchesFilter(byId, { assignee: 'none' }, today, people), false);
+  assert.equal(matchesFilter(byId, { assignee: 'id:u_1' }, today, people), true);
+  assert.equal(matchesFilter(byId, { query: 'priya' }, today, people), true, 'search matches resolved names');
+});
+
+test('workload counts open tasks per assignee', () => {
+  let s = board(['todo', 'A', { assigneeId: 'u_1' }], ['review', 'B', { assigneeId: 'u_1' }],
+    ['todo', 'C', { assignee: 'Sam' }], ['todo', 'D'], ['done', 'E', { assigneeId: 'u_1' }]);
+  const w = workload(s);
+  assert.equal(w.get('id:u_1'), 2);
+  assert.equal(w.get('name:Sam'), 1);
+  assert.equal(w.get(''), 1);
+  assert.deepEqual(allAssigneeKeys(s).sort(), ['id:u_1', 'name:Sam']);
 });
 
 test('getStats summarises the board', () => {

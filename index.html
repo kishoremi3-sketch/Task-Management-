@@ -26,7 +26,7 @@
       <button class="btn btn-primary" id="new-task-btn" title="New task (N)">
         <span aria-hidden="true">+</span> New task
       </button>
-      <div class="menu">
+      <div class="menu" id="board-menu">
         <button class="btn btn-ghost icon-btn" id="menu-btn" aria-haspopup="true" aria-expanded="false" aria-label="Board menu">⋯</button>
         <div class="menu-list" id="menu-list" role="menu" hidden>
           <button role="menuitem" data-action="add-column">Add column</button>
@@ -47,7 +47,7 @@
           <div class="account-card">
             <strong id="account-menu-name"></strong>
             <span id="account-menu-detail"></span>
-            <span class="account-note">Only you can see the tasks on your board.</span>
+            <span class="account-note">Everyone with access to this page can see every team’s board.</span>
           </div>
           <button role="menuitem" id="sign-out-btn" hidden>Sign out</button>
         </div>
@@ -68,6 +68,15 @@
   </section>
 
   <main>
+    <nav class="teams" id="teams" aria-label="Teams"></nav>
+
+    <section class="no-teams" id="no-teams" hidden>
+      <h2 id="no-teams-title">Loading teams…</h2>
+      <p id="no-teams-text"></p>
+      <button class="btn btn-primary" id="no-teams-create" hidden>Create a team</button>
+    </section>
+
+    <div id="team-view" hidden>
     <section class="stats" id="stats" aria-label="Board summary"></section>
 
     <section class="toolbar" aria-label="Filters">
@@ -81,7 +90,7 @@
         <option value="medium">Medium</option>
         <option value="low">Low</option>
       </select>
-      <select id="filter-assignee" aria-label="Filter by assignee"></select>
+      <select id="filter-assignee" aria-label="Filter by person"></select>
       <select id="filter-tag" aria-label="Filter by tag"></select>
       <select id="filter-due" aria-label="Filter by due date">
         <option value="">Any due date</option>
@@ -94,13 +103,14 @@
 
     <section class="welcome" id="welcome" hidden>
       <div>
-        <strong id="welcome-title">Welcome</strong>
-        <p>This is your personal board, and only you can see it. Add your first task with <b>New task</b> or the <b>+</b> on any column.</p>
+        <strong id="welcome-title">This team has no tasks yet</strong>
+        <p>Everyone on the team shares this board. Add the first task with <b>New task</b> or the <b>+</b> on any column, and assign it to someone so the team can see who owns it.</p>
       </div>
       <button class="btn" id="welcome-sample">Load sample tasks</button>
     </section>
 
     <section class="board" id="board" aria-label="Kanban board"></section>
+    </div>
   </main>
 
   <dialog id="task-dialog" aria-labelledby="task-dialog-title">
@@ -137,11 +147,17 @@
           <span>Due date</span>
           <input type="date" name="dueDate">
         </label>
-        <label class="field">
-          <span>Assignee</span>
-          <input name="assignee" list="assignee-options" autocomplete="off" maxlength="60">
-          <datalist id="assignee-options"></datalist>
-        </label>
+        <div class="field">
+          <span id="assignee-label">Assignee</span>
+          <div class="assignee-picker">
+            <div class="assignee-chosen" id="assignee-chosen" hidden></div>
+            <input id="assignee-input" autocomplete="off" maxlength="60" placeholder="Search people…"
+              role="combobox" aria-labelledby="assignee-label" aria-autocomplete="list"
+              aria-controls="assignee-results" aria-expanded="false">
+            <div class="assignee-results" id="assignee-results" role="listbox" hidden></div>
+          </div>
+          <button type="button" class="link-btn" id="assign-me" hidden>Assign to me</button>
+        </div>
       </div>
       <label class="field">
         <span>Tags <small>(comma separated)</small></span>

@@ -1,23 +1,38 @@
 import {
-  PRIORITIES, DONE_COLUMN_ID, STORAGE_KEY,
-  createEmptyState, createSampleState, loadState, saveState, normalizeState, normalizeTags,
-  tasksInColumn, getTask, isOverdue, isDueSoon, allTags, allAssignees, matchesFilter, getStats,
+  PRIORITIES, DONE_COLUMN_ID,
+  createEmptyState, createSampleState, normalizeState, normalizeTags,
+  tasksInColumn, getTask, isOverdue, isDueSoon, allTags, matchesFilter, getStats,
+  assigneeKey, allAssigneeKeys, workload,
   addTask, updateTask, deleteTask, moveTask, addColumn, updateColumn, deleteColumn, isOverWip,
   todayISO,
 } from './store.js';
 import { ssoProviders, signIn, signOut, handleRedirect, currentSession } from './auth.js';
+import { createLocalBackend, createCloudBackend, cleanTeamName } from './backend.js';
 
 const storage = (() => {
   try { return window.localStorage; } catch { return null; }
 })();
 
+// The selected team's board.
 let state = createEmptyState();
-// Who is signed in: { id, name, detail, avatarUrl, color, isOwner, canSignOut }
-// or null when the app runs without sign-in.
+// Who is signed in: { id, name, detail, avatarUrl, color, canSignOut }, or
+// null when the app runs without sign-in. `id` is a claude.ai account id
+// when hosted there, which is what tasks store as assigneeId.
 let identity = null;
-// Each signed-in person gets their own browser copy of their board.
-let storageKey = STORAGE_KEY;
-let filter = { query: '', priority: '', assignee: '', tag: '', due: '' };
+// Where teams and boards are stored (see backend.js).
+let backend = null;
+let teams = [];
+let teamsLoaded = false;
+let teamId = null;
+let closeBoard = null;
+let canManageTeams = false;
+// The `user` capability when hosted on claude.ai: resolves account ids to
+// names and avatars, and powers the assignee search.
+let userApi = null;
+const people = new Map(); // account id -> { name, avatarUrl, color }
+
+const EMPTY_FILTER = { query: '', priority: '', assignee: '', tag: '', due: '' };
+let filter = { ...EMPTY_FILTER };
 let editingId = null;
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -46,22 +61,15 @@ function h(tag, props = {}, ...children) {
 // ---------- state ----------
 
 function commit(next) {
+  if (!teamId) return;
   state = next;
-  saveState(storage, state, storageKey);
-  queueRemoteWrite();
+  backend.saveBoard(teamId, state);
   render();
 }
-
-// ---------- cloud sync ----------
-// When the page runs inside a host that provides a shared document store
-// (window.claude.use("db")), the board is kept in one document there so it
-// follows the user across devices. Otherwise localStorage is the only store.
 
 const claudeUse = (name) => (window.claude?.use
   ? window.claude.use(name).catch(() => null)
   : Promise.resolve(null));
-
-const sync = { ref: null, writing: false, pending: false, readOnly: false };
 
 function setSyncStatus(text, mode = '') {
   const el = $('#sync-status');
@@ -69,93 +77,217 @@ function setSyncStatus(text, mode = '') {
   el.dataset.mode = mode;
 }
 
-function queueRemoteWrite() {
-  if (!sync.ref || sync.readOnly) return;
-  sync.pending = true;
-  if (!sync.writing) flushRemote();
+let warnedWrite = false;
+function onWriteError(err) {
+  if (warnedWrite) return;
+  warnedWrite = true;
+  toast(err?.code === 'invalid_argument'
+    ? 'You can view this board but not change it. Ask the owner for edit access.'
+    : 'Your last change couldn’t be saved to the shared board. Reload the page to try again.');
 }
 
-// One write in flight at a time; a burst of edits collapses into a
-// single write of the latest state.
-async function flushRemote() {
-  sync.writing = true;
-  while (sync.pending) {
-    sync.pending = false;
-    setSyncStatus('Saving…', 'busy');
-    try {
-      await writeWithRetry(state);
-      setSyncStatus('Synced', 'ok');
-    } catch (err) {
-      if (err?.code === 'invalid_argument') {
-        sync.readOnly = true;
-        setSyncStatus('Saved in this browser only', 'warn');
-        toast('Changes can’t be saved to the shared board, so they stay in this browser.');
-      } else if (err?.code === 'revoked') {
-        sync.ref = null;
-        setSyncStatus('Saved in this browser', '');
-      } else {
-        setSyncStatus('Not synced, saved in this browser', 'warn');
-      }
-      break;
-    }
+// ---------- people ----------
+
+// Display info for an assignee key ("id:<account>" or "name:<text>").
+function personFor(key) {
+  if (key.startsWith('id:')) {
+    const id = key.slice(3);
+    const p = people.get(id);
+    const isMe = identity?.id === id;
+    return {
+      name: p?.name || (isMe ? identity.name : '') || 'Someone',
+      avatarUrl: p?.avatarUrl || (isMe ? identity.avatarUrl : null),
+      color: p?.color || (isMe ? identity.color : null),
+      isMe,
+    };
   }
-  sync.writing = false;
+  const name = key.slice(5);
+  return { name, avatarUrl: null, color: null, isMe: Boolean(identity && !identity.id && identity.name === name) };
 }
 
-async function writeWithRetry(data) {
-  try {
-    await sync.ref.set(data);
-  } catch (err) {
-    if (err?.code !== 'unavailable') throw err;
-    await new Promise((r) => setTimeout(r, 500 + Math.random() * 1000));
-    await sync.ref.set(data);
-  }
+function avatarEl(person, cls = 'avatar') {
+  if (person.avatarUrl) return h('span', { class: cls }, h('img', { src: person.avatarUrl, alt: '' }));
+  const el = h('span', { class: cls, style: `--hue:${hue(person.name)}` }, initials(person.name) || '?');
+  if (person.color) el.style.background = person.color;
+  return el;
 }
 
-// Each person's board lives under their own data/users/<id>/ path, which
-// the store keeps private to them (not even the page's owner can read it).
-async function connectCloud() {
-  if (!identity) return;
-  const db = await claudeUse('db');
-  if (!db) return;
-  setSyncStatus('Connecting…', 'busy');
-  sync.ref = db.doc(`data/users/${identity.id}/board`);
-  let seeded = false;
-  sync.ref.onSnapshot(async (snap) => {
-    if (!snap.exists) {
-      if (snap.metadata.fromCache || seeded) return;
-      seeded = true;
-      // First visit. The owner's board used to be shared at boards/main:
-      // carry it over so their existing tasks aren't lost.
-      if (identity.isOwner && state.tasks.length === 0) {
-        try {
-          const legacy = await db.doc('boards/main').get();
-          if (legacy.exists) {
-            state = normalizeState(legacy.data());
-            saveState(storage, state, storageKey);
-            render();
-          }
-        } catch { /* nothing to migrate */ }
+function shortName(name) {
+  const parts = name.split(/\s+/).filter(Boolean);
+  return parts.length > 1 ? `${parts[0]} ${parts[parts.length - 1][0]}.` : name;
+}
+
+function meKeys() {
+  if (!identity) return [];
+  return identity.id && backend?.kind === 'cloud' ? [`id:${identity.id}`] : [`name:${identity.name}`];
+}
+
+const peopleContext = () => ({
+  meKeys: meKeys(),
+  nameOf: (t) => {
+    const key = assigneeKey(t);
+    return key ? personFor(key).name : '';
+  },
+});
+
+// Resolve names/avatars for the accounts on the board; re-render if any
+// changed. The platform caches these, so calling it on every render is cheap.
+function refreshPeople() {
+  if (!userApi) return;
+  const ids = [...new Set(state.tasks.map((t) => t.assigneeId).filter(Boolean))];
+  if (!ids.length) return;
+  userApi.profiles(ids).then((profiles) => {
+    let changed = false;
+    for (const id of ids) {
+      const p = profiles[id];
+      if (!p) continue;
+      const prev = people.get(id);
+      if (!prev || prev.name !== p.name || prev.avatarUrl !== p.avatarUrl) {
+        people.set(id, { name: p.name, avatarUrl: p.avatarUrl, color: p.color });
+        changed = true;
       }
-      queueRemoteWrite();
-      return;
     }
-    if (snap.metadata.hasPendingWrites || sync.writing || sync.pending) return;
-    let incoming;
-    try {
-      incoming = normalizeState(snap.data());
-    } catch {
-      return;
-    }
-    setSyncStatus('Synced', 'ok');
-    if (JSON.stringify(incoming) === JSON.stringify(state) || drag.active) return;
-    state = incoming;
-    saveState(storage, state, storageKey);
-    render();
-  }, () => {
-    sync.ref = null;
-    setSyncStatus('Not synced, saved in this browser', 'warn');
+    if (changed) render();
   });
+}
+
+// ---------- teams ----------
+
+const TEAM_PREF_KEY = 'taskflow.team';
+let createdTeamId = null;
+
+function preferredTeam() {
+  try { return localStorage.getItem(TEAM_PREF_KEY); } catch { return null; }
+}
+
+function onTeams(list) {
+  teams = list;
+  teamsLoaded = true;
+  // A team we just created may not be in the list for a moment; once it
+  // shows up, treat it like any other team.
+  if (teams.some((t) => t.id === createdTeamId)) createdTeamId = null;
+  if (teamId && teamId === createdTeamId) {
+    renderTeams();
+    return;
+  }
+  if (!teams.some((t) => t.id === teamId)) {
+    const pref = preferredTeam();
+    selectTeam(teams.find((t) => t.id === pref)?.id ?? teams[0]?.id ?? null);
+  } else {
+    renderTeams();
+  }
+}
+
+function selectTeam(id) {
+  closeBoard?.();
+  closeBoard = null;
+  teamId = id;
+  filter = { ...EMPTY_FILTER };
+  $('#search').value = '';
+  $('#filter-priority').value = '';
+  $('#filter-due').value = '';
+  if (id) {
+    try { localStorage.setItem(TEAM_PREF_KEY, id); } catch { /* ignore */ }
+    state = backend.cachedBoard(id) ?? createEmptyState();
+    closeBoard = backend.openBoard(id, (board) => {
+      if (JSON.stringify(board) === JSON.stringify(state) || drag.active) return;
+      state = board;
+      render();
+    });
+  } else {
+    state = createEmptyState();
+  }
+  renderTeams();
+  render();
+}
+
+function currentTeam() {
+  return teams.find((t) => t.id === teamId) ?? null;
+}
+
+async function promptNewTeam() {
+  const name = cleanTeamName(await ask({
+    title: 'New team',
+    message: 'Each team gets its own shared board.',
+    value: '',
+    okLabel: 'Create team',
+  }));
+  if (!name) return;
+  try {
+    const id = await backend.createTeam(name);
+    createdTeamId = id;
+    if (!teams.some((t) => t.id === id)) teams = [...teams, { id, name }];
+    selectTeam(id);
+    toast(`Created team “${name}”`);
+  } catch (err) {
+    toast(`Couldn’t create the team: ${err?.message ?? 'unknown error'}`);
+  }
+}
+
+function openTeamMenu(anchor, team) {
+  showPopupMenu(anchor, [
+    ['Rename team', async () => {
+      const name = cleanTeamName(await ask({ title: 'Rename team', value: team.name, okLabel: 'Rename' }));
+      if (!name || name === team.name) return;
+      try {
+        await backend.renameTeam(team.id, name);
+        if (backend.kind === 'cloud') {
+          teams = teams.map((t) => (t.id === team.id ? { ...t, name } : t));
+          renderTeams();
+        }
+      } catch (err) {
+        toast(`Couldn’t rename the team: ${err?.message ?? 'unknown error'}`);
+      }
+    }],
+    ['Delete team', async () => {
+      const n = team.id === teamId ? state.tasks.length : null;
+      const ok = await ask({
+        title: `Delete “${team.name}”?`,
+        message: `${n === null ? 'Its board' : `Its board and ${n} task(s)`} will be deleted for everyone. This can’t be undone.`,
+        okLabel: 'Delete team',
+        danger: true,
+      });
+      if (!ok) return;
+      try {
+        if (createdTeamId === team.id) createdTeamId = null;
+        await backend.deleteTeam(team.id);
+        toast(`Deleted team “${team.name}”`);
+      } catch (err) {
+        toast(`Couldn’t delete the team: ${err?.message ?? 'unknown error'}`);
+      }
+    }, 'danger'],
+  ]);
+}
+
+function renderTeams() {
+  $('#teams').replaceChildren(
+    ...teams.map((t) => {
+      const active = t.id === teamId;
+      return h('div', { class: `team-tab${active ? ' is-active' : ''}` },
+        h('button', {
+          class: 'team-name',
+          'aria-current': active ? 'true' : false,
+          onclick: () => { if (!active) selectTeam(t.id); },
+        }, t.name || 'Untitled team'),
+        canManageTeams && active ? h('button', {
+          class: 'icon-btn btn-ghost small',
+          'aria-label': `${t.name} team options`,
+          title: 'Team options',
+          onclick: (e) => { e.stopPropagation(); openTeamMenu(e.currentTarget, t); },
+        }, '⋯') : null);
+    }),
+    canManageTeams && teams.length ? h('button', { class: 'team-add', onclick: promptNewTeam }, '+ New team') : null,
+  );
+  const hasTeam = Boolean(teamId);
+  $('#team-view').hidden = !hasTeam;
+  $('#new-task-btn').hidden = !hasTeam;
+  $('#board-menu').hidden = !hasTeam;
+  $('#no-teams').hidden = hasTeam;
+  $('#no-teams-title').textContent = teamsLoaded ? 'No teams yet' : 'Loading teams…';
+  $('#no-teams-text').textContent = !teamsLoaded ? ''
+    : canManageTeams ? 'Create a team to get a shared board. You can add as many teams as you need.'
+      : 'Ask the owner of this page to create a team.';
+  $('#no-teams-create').hidden = !(teamsLoaded && canManageTeams);
 }
 
 // ---------- in-page prompt / confirm ----------
@@ -203,13 +335,14 @@ function ask({ title, message = '', value = null, okLabel = 'OK', danger = false
 
 function render() {
   const welcome = $('#welcome');
-  welcome.hidden = !(identity && state.tasks.length === 0);
+  welcome.hidden = !(teamId && state.tasks.length === 0);
   if (!welcome.hidden) {
-    $('#welcome-title').textContent = `Welcome, ${identity.name.split(/\s+/)[0]}`;
+    $('#welcome-title').textContent = `${currentTeam()?.name ?? 'This team'} has no tasks yet`;
   }
   renderStats();
   renderFilters();
   renderBoard();
+  refreshPeople();
 }
 
 function renderStats() {
@@ -243,13 +376,47 @@ function renderStats() {
         h('i', { class: `dot seg-${i % 6}` }), `${c.title} ${s.byColumn[c.id] ?? 0}`))));
 
   statsEl.replaceChildren(
-    tile('Open tasks', s.open, `${s.total} total`),
-    tile('In progress', inProgress, null),
+    tile('Open tasks', s.open, `${inProgress} in progress`),
     tile('Overdue', s.overdue, s.overdue ? 'needs attention' : 'all on track', s.overdue ? 'stat-alert' : ''),
     tile('Due soon', s.dueSoon, 'next 2 days', s.dueSoon ? 'stat-warn' : ''),
     progress,
     distribution,
+    renderPeopleStat(),
   );
+}
+
+// Open tasks per person; clicking a row filters the board to them.
+function renderPeopleStat() {
+  const load = workload(state);
+  const unassigned = load.get('') ?? 0;
+  const rows = [...load].filter(([key]) => key).sort((a, b) => b[1] - a[1]);
+  const shown = rows.slice(0, 4);
+  const max = Math.max(1, ...rows.map(([, n]) => n), unassigned);
+  const row = (key, person, n) => {
+    const active = filter.assignee === key;
+    return h('li', {},
+      h('button', {
+        class: `person-row${active ? ' is-active' : ''}`,
+        'aria-pressed': String(active),
+        title: active ? 'Show everyone' : `Show only ${person ? person.name : 'unassigned'} tasks`,
+        onclick: () => {
+          filter.assignee = active ? '' : key;
+          render();
+        },
+      },
+      person ? avatarEl(person, 'avatar small') : h('span', { class: 'avatar small is-none' }, '–'),
+      h('span', { class: 'person-name' }, person ? (person.isMe ? `${person.name} (you)` : person.name) : 'Unassigned'),
+      h('span', { class: 'person-bar' }, h('i', { style: `width:${Math.round((n / max) * 100)}%` })),
+      h('span', { class: 'person-count' }, n)));
+  };
+  return h('div', { class: 'stat stat-wide stat-people' },
+    h('div', { class: 'stat-label' }, 'Open tasks by person'),
+    rows.length || unassigned
+      ? h('ul', { class: 'people-list' },
+        shown.map(([key, n]) => row(key, personFor(key), n)),
+        unassigned ? row('none', null, unassigned) : null)
+      : h('div', { class: 'stat-sub' }, 'No open tasks'),
+    rows.length > shown.length ? h('div', { class: 'stat-sub' }, `+${rows.length - shown.length} more in the filter above`) : null);
 }
 
 function fillSelect(select, placeholder, values, current) {
@@ -264,9 +431,17 @@ function fillSelect(select, placeholder, values, current) {
 }
 
 function renderFilters() {
-  fillSelect($('#filter-assignee'), 'All assignees', allAssignees(state), filter.assignee);
+  const options = [
+    ['', 'Everyone'],
+    ...(identity ? [['me', 'Assigned to me']] : []),
+    ['none', 'Unassigned'],
+    ...allAssigneeKeys(state)
+      .map((key) => [key, personFor(key).name])
+      .sort((a, b) => a[1].localeCompare(b[1])),
+  ];
+  if (!options.some(([v]) => v === filter.assignee)) filter.assignee = '';
+  $('#filter-assignee').replaceChildren(...options.map(([value, label]) => h('option', { value, selected: value === filter.assignee }, label)));
   fillSelect($('#filter-tag'), 'All tags', allTags(state), filter.tag);
-  $('#assignee-options').replaceChildren(...allAssignees(state).map((a) => h('option', { value: a })));
   const active = Object.values(filter).some(Boolean);
   $('#clear-filters').hidden = !active;
   boardEl.classList.toggle('is-filtered', active);
@@ -299,7 +474,8 @@ function renderBoard() {
 
 function renderColumn(column, index) {
   const all = tasksInColumn(state, column.id);
-  const visible = all.filter((t) => matchesFilter(t, filter));
+  const ctx = peopleContext();
+  const visible = all.filter((t) => matchesFilter(t, filter, undefined, ctx));
   const overWip = isOverWip(state, column.id);
   const countText = visible.length === all.length ? `${all.length}` : `${visible.length}/${all.length}`;
 
@@ -334,7 +510,7 @@ function renderCard(task) {
     class: `card priority-${task.priority}${done ? ' is-done' : ''}`,
     tabindex: 0,
     dataset: { id: task.id },
-    'aria-label': `${task.title}, ${task.priority} priority`,
+    'aria-label': `${task.title}, ${task.priority} priority, ${assigneeKey(task) ? `assigned to ${personFor(assigneeKey(task)).name}` : 'unassigned'}`,
     onkeydown: (e) => onCardKey(e, task),
   },
   h('div', { class: 'card-top' },
@@ -345,9 +521,18 @@ function renderCard(task) {
     }, formatDue(task.dueDate)) : null),
   h('h4', { class: 'card-title' }, task.title),
   task.description ? h('p', { class: 'card-desc' }, task.description) : null,
-  (task.tags.length || task.assignee) ? h('div', { class: 'card-bottom' },
+  h('div', { class: 'card-bottom' },
     h('div', { class: 'tags' }, task.tags.map((t) => h('span', { class: 'tag', style: `--hue:${hue(t)}` }, t))),
-    task.assignee ? h('span', { class: 'avatar', title: task.assignee, style: `--hue:${hue(task.assignee)}` }, initials(task.assignee)) : null) : null);
+    renderAssignee(task)));
+}
+
+function renderAssignee(task) {
+  const key = assigneeKey(task);
+  if (!key) return h('span', { class: 'assignee is-none' }, 'Unassigned');
+  const person = personFor(key);
+  return h('span', { class: `assignee${person.isMe ? ' is-me' : ''}`, title: `Assigned to ${person.name}` },
+    avatarEl(person, 'avatar small'),
+    h('span', { class: 'assignee-name' }, person.isMe ? 'You' : shortName(person.name)));
 }
 
 function renderAddColumn() {
@@ -388,7 +573,11 @@ function openTaskDialog(id = null, columnId = null) {
   form.status.value = task?.status ?? columnId ?? state.columns[0].id;
   form.priority.value = task?.priority ?? 'medium';
   form.dueDate.value = task?.dueDate ?? '';
-  form.assignee.value = task?.assignee ?? '';
+  draftAssignee = task?.assigneeId ? { id: task.assigneeId } : task?.assignee ? { name: task.assignee } : null;
+  $('#assignee-input').value = '';
+  resultItems = [];
+  renderResults();
+  renderChosen();
   form.tags.value = task?.tags.join(', ') ?? '';
   $('#task-dialog-title').textContent = task ? 'Edit task' : 'New task';
   $('#save-task-btn').textContent = task ? 'Save changes' : 'Create task';
@@ -409,9 +598,12 @@ form.addEventListener('submit', (e) => {
     status: form.status.value,
     priority: PRIORITIES.includes(form.priority.value) ? form.priority.value : 'medium',
     dueDate: form.dueDate.value,
-    assignee: form.assignee.value.trim(),
     tags: normalizeTags(form.tags.value),
   };
+  const leftover = $('#assignee-input').value.trim();
+  if (!draftAssignee && leftover) draftAssignee = { name: leftover };
+  fields.assigneeId = draftAssignee?.id ?? '';
+  fields.assignee = draftAssignee?.name ?? '';
   if (!fields.title) {
     form.title.focus();
     return;
@@ -419,6 +611,121 @@ form.addEventListener('submit', (e) => {
   commit(editingId ? updateTask(state, editingId, fields) : addTask(state, fields));
   toast(editingId ? 'Task updated' : 'Task created');
   dialog.close();
+});
+
+// ---------- assignee picker ----------
+// Hosted on claude.ai it searches people in the organization; everywhere
+// it also offers names already used on the board, or any typed name.
+
+let draftAssignee = null; // { id } | { name } | null
+let resultItems = [];
+let activeResult = 0;
+
+const keyOf = (item) => (item.id ? `id:${item.id}` : `name:${item.name}`);
+
+function renderChosen() {
+  const chosen = $('#assignee-chosen');
+  const input = $('#assignee-input');
+  if (draftAssignee) {
+    const person = personFor(keyOf(draftAssignee));
+    chosen.replaceChildren(
+      avatarEl(person, 'avatar small'),
+      h('span', { class: 'chosen-name' }, person.isMe ? `${person.name} (you)` : person.name),
+      h('button', {
+        type: 'button',
+        class: 'chip-clear',
+        'aria-label': 'Remove assignee',
+        onclick: () => {
+          draftAssignee = null;
+          renderChosen();
+          input.focus();
+        },
+      }, '✕'));
+  }
+  chosen.hidden = !draftAssignee;
+  input.hidden = Boolean(draftAssignee);
+  $('#assign-me').hidden = !identity || Boolean(draftAssignee && personFor(keyOf(draftAssignee)).isMe);
+}
+
+async function updateResults() {
+  const input = $('#assignee-input');
+  const query = input.value.trim();
+  const lower = query.toLowerCase();
+  const items = [];
+  if (userApi) {
+    const hits = await userApi.search(query);
+    if (input.value.trim() !== query) return;
+    for (const hit of hits) {
+      people.set(hit.id, { name: hit.name, avatarUrl: hit.avatarUrl, color: hit.color });
+      items.push({ id: hit.id });
+    }
+  }
+  for (const key of allAssigneeKeys(state)) {
+    if (!key.startsWith('name:')) continue;
+    const name = key.slice(5);
+    if (!lower || name.toLowerCase().includes(lower)) items.push({ name });
+  }
+  if (query && !items.some((it) => personFor(keyOf(it)).name.toLowerCase() === lower)) {
+    items.push({ name: query, isNew: true });
+  }
+  resultItems = items.slice(0, 8);
+  activeResult = 0;
+  renderResults();
+}
+
+function renderResults() {
+  const box = $('#assignee-results');
+  const input = $('#assignee-input');
+  const open = document.activeElement === input && resultItems.length > 0;
+  box.hidden = !open;
+  input.setAttribute('aria-expanded', String(open));
+  box.replaceChildren(...resultItems.map((item, i) => {
+    const person = personFor(keyOf(item));
+    return h('button', {
+      type: 'button',
+      role: 'option',
+      class: `result${i === activeResult ? ' is-active' : ''}`,
+      'aria-selected': String(i === activeResult),
+      onmousedown: (e) => e.preventDefault(),
+      onclick: () => chooseAssignee(item),
+    },
+    item.isNew ? null : avatarEl(person, 'avatar small'),
+    item.isNew ? `Use “${item.name}” as a name` : (person.isMe ? `${person.name} (you)` : person.name));
+  }));
+}
+
+function chooseAssignee(item) {
+  draftAssignee = item.id ? { id: item.id } : { name: item.name };
+  $('#assignee-input').value = '';
+  resultItems = [];
+  renderResults();
+  renderChosen();
+}
+
+$('#assignee-input').addEventListener('focus', updateResults);
+$('#assignee-input').addEventListener('input', updateResults);
+$('#assignee-input').addEventListener('blur', () => setTimeout(renderResults));
+$('#assignee-input').addEventListener('keydown', (e) => {
+  const open = !$('#assignee-results').hidden;
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    if (!resultItems.length) return;
+    e.preventDefault();
+    activeResult = (activeResult + (e.key === 'ArrowDown' ? 1 : -1) + resultItems.length) % resultItems.length;
+    renderResults();
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    if (open && resultItems[activeResult]) chooseAssignee(resultItems[activeResult]);
+  } else if (e.key === 'Escape' && open) {
+    e.preventDefault();
+    resultItems = [];
+    renderResults();
+  }
+});
+
+$('#assign-me').addEventListener('click', () => {
+  if (!identity) return;
+  draftAssignee = identity.id && backend?.kind === 'cloud' ? { id: identity.id } : { name: identity.name };
+  renderChosen();
 });
 
 dialog.addEventListener('click', (e) => {
@@ -518,6 +825,12 @@ function openColumnMenu(anchor, column) {
       toast(`Deleted column “${column.title}”`, { label: 'Undo', run: () => commit(before) });
     }, 'danger']);
   }
+  showPopupMenu(anchor, items);
+}
+
+// items: [label, run, className?][]
+function showPopupMenu(anchor, items) {
+  closePopups();
   const menu = h('div', { class: 'menu-list popup', role: 'menu' },
     items.map(([label, run, cls]) => h('button', {
       role: 'menuitem', class: cls,
@@ -822,7 +1135,7 @@ $('#theme-btn').addEventListener('click', () => {
 // ---------- global shortcuts ----------
 
 document.addEventListener('keydown', (e) => {
-  if (document.body.dataset.view !== 'app') return;
+  if (document.body.dataset.view !== 'app' || !teamId) return;
   if (dialog.open || askDialog.open || e.ctrlKey || e.metaKey || e.altKey) return;
   const typing = e.target.closest('input, textarea, select, [contenteditable]');
   if (e.key === 'Escape') closePopups();
@@ -845,15 +1158,6 @@ setInterval(() => {
   }
 }, 60000);
 
-// Sync changes made in another tab.
-window.addEventListener('storage', (e) => {
-  if (e.storageArea !== storage || e.key !== storageKey) return;
-  const next = loadState(storage, storageKey);
-  if (next && !drag.active) {
-    state = next;
-    render();
-  }
-});
 
 // ---------- toast ----------
 
@@ -932,11 +1236,13 @@ function showSignInError(message) {
   el.hidden = !message;
 }
 
-// Works out who is using the app, then loads that person's board.
+// Works out who is using the app and where boards are stored.
 // - Hosted on claude.ai: the viewer's claude.ai account (their company SSO
-//   when their organization uses one). Boards sync through the page's db.
-// - Self-hosted with SSO_PROVIDERS configured: OpenID Connect sign-in.
-// - Otherwise: no sign-in, one board per browser.
+//   when their organization uses one); teams and boards are shared through
+//   the page's database.
+// - Self-hosted with SSO_PROVIDERS configured: OpenID Connect sign-in;
+//   teams and boards are kept in this browser.
+// - Otherwise: no sign-in, teams and boards in this browser.
 async function boot() {
   const hosted = Boolean(window.claude?.use);
   if (!hosted && ssoProviders().length) {
@@ -957,12 +1263,14 @@ async function boot() {
       detail: [session.email, `Signed in with ${session.providerLabel}`].filter(Boolean).join(' · '),
       avatarUrl: null,
       color: null,
-      isOwner: false,
       canSignOut: true,
     };
-  } else if (hosted) {
-    const user = await claudeUse('user');
-    const me = user ? await user.me() : null;
+  }
+
+  let db = null;
+  if (hosted) {
+    [userApi, db] = await Promise.all([claudeUse('user'), claudeUse('db')]);
+    const me = userApi ? await userApi.me() : null;
     if (me?.id) {
       identity = {
         id: me.id,
@@ -970,19 +1278,26 @@ async function boot() {
         detail: 'Signed in with your Claude account',
         avatarUrl: me.avatarUrl,
         color: me.color,
-        isOwner: me.isOwner,
         canSignOut: false,
       };
     }
+    canManageTeams = Boolean(me?.canEdit);
   }
 
-  storageKey = identity ? `${STORAGE_KEY}:${identity.id}` : STORAGE_KEY;
-  state = loadState(storage, storageKey) ?? (identity ? createEmptyState() : createSampleState());
-  saveState(storage, state, storageKey);
+  if (db) {
+    backend = createCloudBackend(db, storage, { onStatus: setSyncStatus, onWriteError });
+  } else {
+    backend = createLocalBackend(storage);
+    canManageTeams = true;
+    setSyncStatus('Saved in this browser');
+  }
+
   document.body.dataset.view = 'app';
   renderAccount();
-  render();
-  if (hosted) connectCloud();
+  renderTeams();
+  backend.subscribeTeams(onTeams, () => setSyncStatus('Not synced', 'warn'));
 }
+
+$('#no-teams-create').addEventListener('click', promptNewTeam);
 
 boot();

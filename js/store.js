@@ -114,6 +114,9 @@ function normalizeTask(t, status) {
     priority: PRIORITIES.includes(t.priority) ? t.priority : 'medium',
     dueDate: /^\d{4}-\d{2}-\d{2}$/.test(t.dueDate ?? '') ? t.dueDate : '',
     tags: normalizeTags(t.tags),
+    // assigneeId is a person's account id (hosted on claude.ai); assignee
+    // is a free-text name, used when accounts aren't available.
+    assigneeId: String(t.assigneeId ?? '').trim(),
     assignee: String(t.assignee ?? '').trim(),
     order: Number.isFinite(t.order) ? t.order : 0,
     createdAt: t.createdAt || now,
@@ -175,21 +178,46 @@ export function allTags(state) {
   return [...new Set(state.tasks.flatMap((t) => t.tags))].sort();
 }
 
-export function allAssignees(state) {
-  return [...new Set(state.tasks.map((t) => t.assignee).filter(Boolean))].sort();
+// One key per assignee: "id:<account id>" or "name:<free text>".
+export function assigneeKey(task) {
+  if (task.assigneeId) return `id:${task.assigneeId}`;
+  if (task.assignee) return `name:${task.assignee}`;
+  return '';
 }
 
-export function matchesFilter(task, filter = {}, today = todayISO()) {
+export function allAssigneeKeys(state) {
+  return [...new Set(state.tasks.map(assigneeKey).filter(Boolean))];
+}
+
+// Open (not done) task counts per assignee key; '' counts unassigned.
+export function workload(state) {
+  const counts = new Map();
+  for (const t of state.tasks) {
+    if (t.status === DONE_COLUMN_ID) continue;
+    const key = assigneeKey(t);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return counts;
+}
+
+// filter.assignee: '' (anyone), 'me', 'none', or an assigneeKey.
+// people.meKeys lists the keys that mean "me"; people.nameOf(task) gives
+// the assignee's display name so search can match it.
+export function matchesFilter(task, filter = {}, today = todayISO(), people = {}) {
   const { query = '', priority = '', tag = '', assignee = '', due = '' } = filter;
+  const { meKeys = [], nameOf = (t) => t.assignee } = people;
   if (priority && task.priority !== priority) return false;
   if (tag && !task.tags.includes(tag)) return false;
-  if (assignee && task.assignee !== assignee) return false;
+  const key = assigneeKey(task);
+  if (assignee === 'none' && key) return false;
+  if (assignee === 'me' && !meKeys.includes(key)) return false;
+  if (assignee && assignee !== 'none' && assignee !== 'me' && key !== assignee) return false;
   if (due === 'overdue' && !isOverdue(task, today)) return false;
   if (due === 'soon' && !isDueSoon(task, today)) return false;
   if (due === 'none' && task.dueDate) return false;
   const q = query.trim().toLowerCase();
   if (q) {
-    const haystack = [task.title, task.description, task.assignee, ...task.tags].join(' ').toLowerCase();
+    const haystack = [task.title, task.description, nameOf(task), ...task.tags].join(' ').toLowerCase();
     if (!haystack.includes(q)) return false;
   }
   return true;
