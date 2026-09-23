@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   createLocalBackend, createCloudBackend, boardKey, FIRST_TEAM_ID, FIRST_TEAM_NAME, cleanTeamName, sortTeams,
+  cleanMembers, visibleTeams,
 } from '../js/backend.js';
 import { createEmptyState, addTask, saveState, STORAGE_KEY } from '../js/store.js';
 
@@ -87,4 +88,26 @@ test('team helpers', () => {
     { id: '2', name: 'B', createdAt: '2026-02-01' },
     { id: '1', name: 'A', createdAt: '2026-01-01' },
   ]).map((t) => t.id), ['1', '2']);
+});
+
+test('people only see teams they are members of, unless they manage teams', () => {
+  const teams = [
+    { id: 'a', name: 'Design', members: ['u_1', 'u_2'] },
+    { id: 'b', name: 'Sales', members: ['u_3'] },
+    { id: 'c', name: 'New team' },
+  ];
+  assert.deepEqual(visibleTeams(teams, { userId: 'u_1' }).map((t) => t.id), ['a']);
+  assert.deepEqual(visibleTeams(teams, { userId: 'u_3' }).map((t) => t.id), ['b']);
+  assert.deepEqual(visibleTeams(teams, { userId: 'u_9' }), []);
+  assert.deepEqual(visibleTeams(teams, { userId: null }), []);
+  assert.deepEqual(visibleTeams(teams, { userId: 'u_9', canManage: true }).map((t) => t.id), ['a', 'b', 'c']);
+});
+
+test('members are de-duplicated and saved per team', async () => {
+  assert.deepEqual(cleanMembers(['u_1', 'u_1', '', null, 'u_2']), ['u_1', 'u_2']);
+  assert.deepEqual(cleanMembers(undefined), []);
+  const backend = createLocalBackend(memoryStorage(), null);
+  const id = await backend.createTeam('Ops', ['u_1']);
+  await backend.setMembers(id, ['u_1', 'u_2', 'u_2']);
+  assert.deepEqual(lastTeams(backend).find((t) => t.id === id).members, ['u_1', 'u_2']);
 });

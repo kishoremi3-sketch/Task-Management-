@@ -476,6 +476,54 @@ body:not([data-view="signin"]) .signin { display: none; }
 .no-teams p { margin: 0; color: var(--muted); max-width: 48ch; }
 .no-teams p:empty { display: none; }
 
+.team-count {
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 99px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.team-count.is-empty { font-style: italic; font-weight: 400; }
+
+.team-members { margin-left: auto; flex: none; padding-left: 12px; }
+
+.members-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 99px;
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.members-btn:hover { background: var(--surface-2); }
+.members-btn.is-static { padding-right: 6px; }
+
+.member-faces { display: inline-flex; align-items: center; }
+.member-faces .avatar { box-shadow: 0 0 0 2px var(--surface); }
+.member-faces .avatar + .avatar { margin-left: -6px; }
+.member-none { color: var(--muted); font-weight: 400; font-style: italic; }
+
+/* ---------- team members dialog ---------- */
+
+.members-dialog { width: min(460px, calc(100vw - 32px)); }
+#members-form { display: flex; flex-direction: column; gap: 12px; padding: 18px 20px 20px; }
+#member-input { width: 100%; padding: 8px 10px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
+.member-list { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; max-height: 260px; overflow-y: auto; }
+.member-row { display: flex; align-items: center; gap: 10px; padding: 4px 4px 4px 2px; }
+.member-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.member-empty, .member-note { margin: 0; color: var(--muted); font-size: 12px; }
+.member-empty[hidden] { display: none; }
+.result-note { margin-left: auto; color: var(--muted); font-size: 11px; }
+
 /* ---------- assignee picker ---------- */
 
 .assignee-picker { position: relative; }

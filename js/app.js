@@ -7,7 +7,9 @@ import {
   todayISO,
 } from './store.js';
 import { ssoProviders, signIn, signOut, handleRedirect, currentSession } from './auth.js';
-import { createLocalBackend, createCloudBackend, cleanTeamName } from './backend.js';
+import {
+  createLocalBackend, createCloudBackend, cleanTeamName, cleanMembers, visibleTeams,
+} from './backend.js';
 
 const storage = (() => {
   try { return window.localStorage; } catch { return null; }
@@ -21,6 +23,9 @@ let state = createEmptyState();
 let identity = null;
 // Where teams and boards are stored (see backend.js).
 let backend = null;
+// Every team, and the ones this person is shown (their teams, or all of
+// them for people who manage teams).
+let allTeams = [];
 let teams = [];
 let teamsLoaded = false;
 let teamId = null;
@@ -134,7 +139,10 @@ const peopleContext = () => ({
 // changed. The platform caches these, so calling it on every render is cheap.
 function refreshPeople() {
   if (!userApi) return;
-  const ids = [...new Set(state.tasks.map((t) => t.assigneeId).filter(Boolean))];
+  const ids = [...new Set([
+    ...state.tasks.map((t) => t.assigneeId).filter(Boolean),
+    ...teamMembers(currentTeam()),
+  ])];
   if (!ids.length) return;
   userApi.profiles(ids).then((profiles) => {
     let changed = false;
@@ -147,7 +155,10 @@ function refreshPeople() {
         changed = true;
       }
     }
-    if (changed) render();
+    if (changed) {
+      renderTeams();
+      render();
+    }
   });
 }
 
@@ -160,8 +171,14 @@ function preferredTeam() {
   try { return localStorage.getItem(TEAM_PREF_KEY); } catch { return null; }
 }
 
+// Team membership needs real accounts, so it's only offered where the
+// page can look people up (hosted on claude.ai).
+const membersEnabled = () => Boolean(userApi) && backend?.kind === 'cloud';
+const teamMembers = (team) => cleanMembers(team?.members);
+
 function onTeams(list) {
-  teams = list;
+  allTeams = list;
+  teams = visibleTeams(list, { userId: identity?.id, canManage: canManageTeams });
   teamsLoaded = true;
   // A team we just created may not be in the list for a moment; once it
   // shows up, treat it like any other team.
@@ -214,9 +231,11 @@ async function promptNewTeam() {
   }));
   if (!name) return;
   try {
-    const id = await backend.createTeam(name);
+    // The creator starts as the team's first member.
+    const members = membersEnabled() && identity?.id ? [identity.id] : [];
+    const id = await backend.createTeam(name, members);
     createdTeamId = id;
-    if (!teams.some((t) => t.id === id)) teams = [...teams, { id, name }];
+    if (!teams.some((t) => t.id === id)) teams = [...teams, { id, name, members }];
     selectTeam(id);
     toast(`Created team “${name}”`);
   } catch (err) {
@@ -226,6 +245,7 @@ async function promptNewTeam() {
 
 function openTeamMenu(anchor, team) {
   showPopupMenu(anchor, [
+    ...(membersEnabled() ? [['Manage members…', () => openMembersDialog(team)]] : []),
     ['Rename team', async () => {
       const name = cleanTeamName(await ask({ title: 'Rename team', value: team.name, okLabel: 'Rename' }));
       if (!name || name === team.name) return;
@@ -259,16 +279,166 @@ function openTeamMenu(anchor, team) {
   ]);
 }
 
+// Faces of the current team's members, beside the tabs.
+function renderMembersStrip() {
+  const team = currentTeam();
+  if (!team || !membersEnabled()) return null;
+  const members = teamMembers(team);
+  const shown = members.slice(0, 5);
+  const label = members.length
+    ? `${members.length} member${members.length === 1 ? '' : 's'}: ${members.map((id) => personFor(`id:${id}`).name).join(', ')}`
+    : 'No members yet';
+  const faces = h('span', { class: 'member-faces', title: label },
+    shown.map((id) => avatarEl(personFor(`id:${id}`), 'avatar small')),
+    members.length > shown.length ? h('span', { class: 'avatar small is-none' }, `+${members.length - shown.length}`) : null,
+    members.length ? null : h('span', { class: 'member-none' }, 'No members'));
+  return h('div', { class: 'team-members' },
+    canManageTeams
+      ? h('button', { class: 'members-btn', 'aria-label': `Manage members. ${label}`, onclick: () => openMembersDialog(team) }, faces, 'Members')
+      : h('span', { class: 'members-btn is-static', 'aria-label': label }, faces));
+}
+
+// ---------- team members dialog ----------
+
+const membersDialog = $('#members-dialog');
+let membersTeam = null;
+let draftMembers = [];
+let memberResults = [];
+let activeMember = 0;
+
+function openMembersDialog(team) {
+  membersTeam = team;
+  draftMembers = teamMembers(team);
+  memberResults = [];
+  $('#members-title').textContent = `${team.name} members`;
+  $('#member-input').value = '';
+  renderMemberList();
+  renderMemberResults();
+  membersDialog.showModal();
+  $('#member-input').focus();
+  if (draftMembers.length) {
+    userApi.profiles(draftMembers).then((profiles) => {
+      for (const [id, p] of Object.entries(profiles)) people.set(id, { name: p.name, avatarUrl: p.avatarUrl, color: p.color });
+      renderMemberList();
+    });
+  }
+}
+
+function renderMemberList() {
+  const list = $('#member-list');
+  list.replaceChildren(...draftMembers.map((id) => {
+    const person = personFor(`id:${id}`);
+    return h('li', { class: 'member-row' },
+      avatarEl(person, 'avatar small'),
+      h('span', { class: 'member-name' }, person.isMe ? `${person.name} (you)` : person.name),
+      h('button', {
+        type: 'button',
+        class: 'chip-clear',
+        'aria-label': `Remove ${person.name}`,
+        onclick: () => {
+          draftMembers = draftMembers.filter((m) => m !== id);
+          renderMemberList();
+        },
+      }, '✕'));
+  }));
+  $('#member-empty').hidden = draftMembers.length > 0;
+  $('#member-add-me').hidden = !identity?.id || draftMembers.includes(identity.id);
+}
+
+async function updateMemberResults() {
+  const input = $('#member-input');
+  const query = input.value.trim();
+  const hits = await userApi.search(query);
+  if (input.value.trim() !== query) return;
+  for (const hit of hits) people.set(hit.id, { name: hit.name, avatarUrl: hit.avatarUrl, color: hit.color });
+  memberResults = hits.filter((hit) => !draftMembers.includes(hit.id)).map((hit) => hit.id);
+  activeMember = 0;
+  renderMemberResults();
+}
+
+function renderMemberResults() {
+  const input = $('#member-input');
+  const box = $('#member-results');
+  const open = document.activeElement === input && memberResults.length > 0;
+  box.hidden = !open;
+  input.setAttribute('aria-expanded', String(open));
+  box.replaceChildren(...memberResults.map((id, i) => {
+    const person = personFor(`id:${id}`);
+    return h('button', {
+      type: 'button',
+      role: 'option',
+      class: `result${i === activeMember ? ' is-active' : ''}`,
+      'aria-selected': String(i === activeMember),
+      onmousedown: (e) => e.preventDefault(),
+      onclick: () => addMember(id),
+    }, avatarEl(person, 'avatar small'), person.isMe ? `${person.name} (you)` : person.name);
+  }));
+}
+
+function addMember(id) {
+  if (!draftMembers.includes(id)) draftMembers = [...draftMembers, id];
+  $('#member-input').value = '';
+  memberResults = [];
+  renderMemberResults();
+  renderMemberList();
+}
+
+$('#member-input').addEventListener('focus', updateMemberResults);
+$('#member-input').addEventListener('input', updateMemberResults);
+$('#member-input').addEventListener('blur', () => setTimeout(renderMemberResults));
+$('#member-input').addEventListener('keydown', (e) => {
+  const open = !$('#member-results').hidden;
+  if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && memberResults.length) {
+    e.preventDefault();
+    activeMember = (activeMember + (e.key === 'ArrowDown' ? 1 : -1) + memberResults.length) % memberResults.length;
+    renderMemberResults();
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    if (open && memberResults[activeMember]) addMember(memberResults[activeMember]);
+  } else if (e.key === 'Escape' && open) {
+    e.preventDefault();
+    memberResults = [];
+    renderMemberResults();
+  }
+});
+
+$('#member-add-me').addEventListener('click', () => addMember(identity.id));
+
+$('#members-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const team = membersTeam;
+  const before = teamMembers(team);
+  const after = cleanMembers(draftMembers);
+  membersDialog.close();
+  if (before.join() === after.join()) return;
+  try {
+    await backend.setMembers(team.id, after);
+    toast(`Saved members of ${team.name}`);
+  } catch (err) {
+    toast(`Couldn’t save members: ${err?.message ?? 'unknown error'}`);
+  }
+});
+
+membersDialog.addEventListener('click', (e) => {
+  if (e.target === membersDialog || e.target.closest('[data-close-members]')) membersDialog.close();
+});
+
 function renderTeams() {
+  const showCounts = membersEnabled() && canManageTeams;
   $('#teams').replaceChildren(
     ...teams.map((t) => {
       const active = t.id === teamId;
+      const count = teamMembers(t).length;
       return h('div', { class: `team-tab${active ? ' is-active' : ''}` },
         h('button', {
           class: 'team-name',
           'aria-current': active ? 'true' : false,
           onclick: () => { if (!active) selectTeam(t.id); },
-        }, t.name || 'Untitled team'),
+        }, t.name || 'Untitled team',
+        showCounts ? h('span', {
+          class: `team-count${count ? '' : ' is-empty'}`,
+          title: count ? `${count} member(s)` : 'No members yet: only people who can edit this page see it',
+        }, count ? String(count) : 'no members') : null),
         canManageTeams && active ? h('button', {
           class: 'icon-btn btn-ghost small',
           'aria-label': `${t.name} team options`,
@@ -277,16 +447,20 @@ function renderTeams() {
         }, '⋯') : null);
     }),
     canManageTeams && teams.length ? h('button', { class: 'team-add', onclick: promptNewTeam }, '+ New team') : null,
+    renderMembersStrip(),
   );
   const hasTeam = Boolean(teamId);
   $('#team-view').hidden = !hasTeam;
   $('#new-task-btn').hidden = !hasTeam;
   $('#board-menu').hidden = !hasTeam;
   $('#no-teams').hidden = hasTeam;
-  $('#no-teams-title').textContent = teamsLoaded ? 'No teams yet' : 'Loading teams…';
+  const notOnATeam = teamsLoaded && !canManageTeams && allTeams.length > 0;
+  $('#no-teams-title').textContent = !teamsLoaded ? 'Loading teams…'
+    : notOnATeam ? 'You’re not on a team yet' : 'No teams yet';
   $('#no-teams-text').textContent = !teamsLoaded ? ''
     : canManageTeams ? 'Create a team to get a shared board. You can add as many teams as you need.'
-      : 'Ask the owner of this page to create a team.';
+      : notOnATeam ? 'You’ll see a team’s board here once the owner of this page adds you to it.'
+        : 'Ask the owner of this page to create a team.';
   $('#no-teams-create').hidden = !(teamsLoaded && canManageTeams);
 }
 
@@ -653,11 +827,17 @@ async function updateResults() {
   const lower = query.toLowerCase();
   const items = [];
   if (userApi) {
-    const hits = await userApi.search(query);
+    // With nothing typed, suggest this team's members first.
+    const members = membersEnabled() ? teamMembers(currentTeam()) : [];
+    const [hits, profiles] = await Promise.all([
+      userApi.search(query),
+      !query && members.length ? userApi.profiles(members) : null,
+    ]);
     if (input.value.trim() !== query) return;
-    for (const hit of hits) {
-      people.set(hit.id, { name: hit.name, avatarUrl: hit.avatarUrl, color: hit.color });
-      items.push({ id: hit.id });
+    for (const p of [...Object.values(profiles ?? {}), ...hits]) {
+      if (!p.id || (!p.name && !members.includes(p.id))) continue;
+      people.set(p.id, { name: p.name, avatarUrl: p.avatarUrl, color: p.color });
+      if (!items.some((it) => it.id === p.id)) items.push({ id: p.id });
     }
   }
   for (const key of allAssigneeKeys(state)) {
@@ -690,8 +870,17 @@ function renderResults() {
       onclick: () => chooseAssignee(item),
     },
     item.isNew ? null : avatarEl(person, 'avatar small'),
-    item.isNew ? `Use “${item.name}” as a name` : (person.isMe ? `${person.name} (you)` : person.name));
+    item.isNew ? `Use “${item.name}” as a name` : (person.isMe ? `${person.name} (you)` : person.name),
+    item.id && notOnTeam(item.id) ? h('span', { class: 'result-note' }, 'not on this team') : null);
   }));
+}
+
+// True when the team has members and this person isn't one of them, so
+// they wouldn't see the task.
+function notOnTeam(id) {
+  if (!membersEnabled()) return false;
+  const members = teamMembers(currentTeam());
+  return members.length > 0 && !members.includes(id);
 }
 
 function chooseAssignee(item) {
@@ -1136,7 +1325,7 @@ $('#theme-btn').addEventListener('click', () => {
 
 document.addEventListener('keydown', (e) => {
   if (document.body.dataset.view !== 'app' || !teamId) return;
-  if (dialog.open || askDialog.open || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (dialog.open || askDialog.open || membersDialog.open || e.ctrlKey || e.metaKey || e.altKey) return;
   const typing = e.target.closest('input, textarea, select, [contenteditable]');
   if (e.key === 'Escape') closePopups();
   if (typing) return;

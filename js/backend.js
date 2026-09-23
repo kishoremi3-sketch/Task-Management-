@@ -3,8 +3,8 @@
 //
 //   kind                'local' | 'cloud'
 //   subscribeTeams(fn)  fn(teams) now and on every change; returns unsubscribe
-//   createTeam(name)    resolves the new team's id
-//   renameTeam(id, name), deleteTeam(id)
+//   createTeam(name, members)  resolves the new team's id
+//   renameTeam(id, name), setMembers(id, members), deleteTeam(id)
 //   openBoard(teamId, fn)  fn(boardState) whenever the board changes
 //                          remotely; returns unsubscribe
 //   saveBoard(teamId, state)
@@ -26,6 +26,21 @@ export const boardKey = (teamId) => `${STORAGE_KEY}:team:${teamId}`;
 
 export function cleanTeamName(name) {
   return String(name ?? '').trim().replace(/\s+/g, ' ').slice(0, 60);
+}
+
+// Team members are account ids. Only members (and people who manage
+// teams) are shown a team; see visibleTeams.
+export function cleanMembers(members) {
+  return [...new Set((Array.isArray(members) ? members : []).filter((m) => typeof m === 'string' && m))];
+}
+
+// The teams a person should see: everything for those who manage teams,
+// otherwise only teams listing them as a member. This is what the page
+// shows, not an access control: the data itself is readable by everyone
+// who can open the page.
+export function visibleTeams(teams, { userId = null, canManage = false } = {}) {
+  if (canManage) return teams;
+  return teams.filter((t) => userId && cleanMembers(t.members).includes(userId));
 }
 
 export function sortTeams(teams) {
@@ -81,14 +96,19 @@ export function createLocalBackend(storage, events = globalThis.window) {
       fn(teams);
       return () => teamListeners.delete(fn);
     },
-    async createTeam(name) {
-      const team = { id: uid('team'), name: cleanTeamName(name), createdAt: new Date().toISOString() };
+    async createTeam(name, members = []) {
+      const team = {
+        id: uid('team'), name: cleanTeamName(name), members: cleanMembers(members), createdAt: new Date().toISOString(),
+      };
       saveState(storage, createEmptyState(), boardKey(team.id));
       setTeams([...teams, team]);
       return team.id;
     },
     async renameTeam(id, name) {
       setTeams(teams.map((t) => (t.id === id ? { ...t, name: cleanTeamName(name) } : t)));
+    },
+    async setMembers(id, members) {
+      setTeams(teams.map((t) => (t.id === id ? { ...t, members: cleanMembers(members) } : t)));
     },
     async deleteTeam(id) {
       try { storage?.removeItem(boardKey(id)); } catch { /* ignore */ }
@@ -164,14 +184,17 @@ export function createCloudBackend(db, storage, { onStatus = () => {}, onWriteEr
         fn(sortTeams(snap.docs.map((d) => ({ ...d.data(), id: d.id }))));
       }, onError);
     },
-    async createTeam(name) {
+    async createTeam(name, members = []) {
       const ref = db.collection('teams').doc();
       await db.doc(`boards/${ref.id}`).set(createEmptyState());
-      await ref.set({ name: cleanTeamName(name), createdAt: new Date().toISOString() });
+      await ref.set({ name: cleanTeamName(name), members: cleanMembers(members), createdAt: new Date().toISOString() });
       return ref.id;
     },
     async renameTeam(id, name) {
       await db.doc(`teams/${id}`).update({ name: cleanTeamName(name) });
+    },
+    async setMembers(id, members) {
+      await db.doc(`teams/${id}`).update({ members: cleanMembers(members) });
     },
     async deleteTeam(id) {
       await db.doc(`teams/${id}`).delete();

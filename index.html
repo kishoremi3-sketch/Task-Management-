@@ -186,6 +186,31 @@
     </form>
   </dialog>
 
+  <dialog id="members-dialog" class="members-dialog" aria-labelledby="members-title">
+    <form id="members-form" method="dialog">
+      <header class="dialog-header">
+        <h2 id="members-title">Team members</h2>
+        <button type="button" class="btn btn-ghost icon-btn" data-close-members aria-label="Close">✕</button>
+      </header>
+      <p class="ask-message">Only members see this team’s tab and tasks. People who can edit this page see every team.</p>
+      <div class="assignee-picker">
+        <input id="member-input" autocomplete="off" maxlength="80" placeholder="Add people by name…"
+          role="combobox" aria-label="Add people by name" aria-autocomplete="list"
+          aria-controls="member-results" aria-expanded="false">
+        <div class="assignee-results" id="member-results" role="listbox" hidden></div>
+      </div>
+      <ul class="member-list" id="member-list" aria-label="Members"></ul>
+      <p class="member-empty" id="member-empty">No members yet. Until you add people, only people who can edit this page see this team.</p>
+      <button type="button" class="link-btn" id="member-add-me" hidden>Add me</button>
+      <p class="member-note">This controls what each person sees on the page. It doesn’t make a team’s tasks confidential.</p>
+      <footer class="dialog-footer">
+        <span class="spacer"></span>
+        <button type="button" class="btn btn-ghost" data-close-members>Cancel</button>
+        <button type="submit" class="btn btn-primary">Save members</button>
+      </footer>
+    </form>
+  </dialog>
+
   <input type="file" id="import-input" accept="application/json,.json" hidden>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 

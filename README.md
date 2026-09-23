@@ -14,6 +14,7 @@ TaskFlow is a lightweight task manager. Its home screen is a Kanban board with a
 - **Light & dark themes**. The app follows your system setting until you toggle it.
 - **Cross-tab sync**: changes in one tab show up in the others.
 - **Teams**: create as many teams as you need. Each has its own shared board; switch between them with the tabs above the dashboard.
+- **Team members** (hosted on claude.ai): add people to each team. Each person only sees the tabs and tasks of their own teams; people who can edit the page see every team so they can manage them. This controls what the page shows, not who can read the data: anyone with access to the page could still read other teams' tasks with developer tools.
 - **Assignees**: assign tasks to people (hosted on claude.ai: search your organization by name; elsewhere: type a name). Every card shows who owns it, "Open tasks by person" shows each person's workload (click a person to filter), and there's an "Assigned to me" filter.
 - **Sign-in**: people sign in and their name and avatar appear in the top bar (see [Sign-in](#sign-in)).
 - **Cloud sync when hosted on claude.ai**: teams and boards are stored in the artifact's database and shared live with everyone who has access. Everywhere else they're kept in the browser.
