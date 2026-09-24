@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TaskFlow</title>
+  <meta name="description" content="Task management with a Kanban board dashboard.">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%234f46e5'/><rect x='6' y='7' width='5' height='18' rx='1.5' fill='white'/><rect x='13.5' y='7' width='5' height='12' rx='1.5' fill='white'/><rect x='21' y='7' width='5' height='8' rx='1.5' fill='white'/></svg>">
+  <link rel="stylesheet" href="css/styles.css">
+  <script>
+    // Apply the saved theme before first paint to avoid a flash.
+    try {
+      const theme = localStorage.getItem('taskflow.theme');
+      if (theme) document.documentElement.dataset.theme = theme;
+    } catch {}
+  </script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="currentColor"/><rect x="6" y="7" width="5" height="18" rx="1.5" fill="#fff"/><rect x="13.5" y="7" width="5" height="12" rx="1.5" fill="#fff"/><rect x="21" y="7" width="5" height="8" rx="1.5" fill="#fff"/></svg>
+      <span>TaskFlow</span>
+    </div>
+    <div class="topbar-actions">
+      <span class="sync" id="sync-status" title="Where your board is saved">Saved in this browser</span>
+      <button class="btn btn-ghost reports-btn" id="reports-btn" title="Reports">Reports</button>
+      <button class="btn btn-primary" id="new-task-btn" title="New task (N)">
+        <span aria-hidden="true">+</span> New task
+      </button>
+      <div class="menu" id="board-menu">
+        <button class="btn btn-ghost icon-btn" id="menu-btn" aria-haspopup="true" aria-expanded="false" aria-label="Board menu">⋯</button>
+        <div class="menu-list" id="menu-list" role="menu" hidden>
+          <button role="menuitem" data-action="reports">Reports…</button>
+          <button role="menuitem" data-action="add-column">Add column</button>
+          <button role="menuitem" data-action="export">Export board (JSON)</button>
+          <button role="menuitem" data-action="import">Import board…</button>
+          <button role="menuitem" data-action="sample">Load sample data</button>
+          <button role="menuitem" data-action="clear-done">Clear completed tasks</button>
+          <button role="menuitem" data-action="reset" class="danger">Delete all tasks</button>
+        </div>
+      </div>
+      <button class="btn btn-ghost icon-btn" id="theme-btn" aria-label="Toggle dark mode" title="Toggle theme">◐</button>
+      <div class="menu account" id="account" hidden>
+        <button class="account-btn" id="account-btn" aria-haspopup="true" aria-expanded="false">
+          <span class="account-avatar" id="account-avatar" aria-hidden="true"></span>
+          <span class="account-name" id="account-name"></span>
+        </button>
+        <div class="menu-list account-menu" id="account-menu" role="menu" hidden>
+          <div class="account-card">
+            <strong id="account-menu-name"></strong>
+            <span class="admin-badge" id="admin-badge" hidden>Admin</span>
+            <span id="account-menu-detail"></span>
+            <span class="account-note" id="account-note"></span>
+          </div>
+          <button role="menuitem" id="admin-btn" hidden>Admin settings</button>
+          <button role="menuitem" id="sign-out-btn" hidden>Sign out</button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <div class="boot" id="boot" role="status">Loading your board…</div>
+
+  <section class="signin" id="signin" aria-labelledby="signin-title">
+    <div class="signin-card">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="currentColor"/><rect x="6" y="7" width="5" height="18" rx="1.5" fill="#fff"/><rect x="13.5" y="7" width="5" height="12" rx="1.5" fill="#fff"/><rect x="21" y="7" width="5" height="8" rx="1.5" fill="#fff"/></svg>
+      <h1 id="signin-title">Sign in to TaskFlow</h1>
+      <p>Use your work account. Your board is private: only you see your tasks.</p>
+      <div class="signin-options" id="signin-options"></div>
+      <p class="signin-error" id="signin-error" role="alert" hidden></p>
+    </div>
+  </section>
+
+  <main>
+    <nav class="teams" id="teams" aria-label="Teams"></nav>
+
+    <section class="no-teams" id="no-teams" hidden>
+      <h2 id="no-teams-title">Loading teams…</h2>
+      <p id="no-teams-text"></p>
+      <button class="btn btn-primary" id="no-teams-create" hidden>Create a team</button>
+    </section>
+
+    <div id="team-view" hidden>
+    <section class="sprint-bar" id="sprint-bar" aria-label="Sprint">
+      <div class="sprint-pick">
+        <label for="sprint-view">Showing</label>
+        <select id="sprint-view"></select>
+      </div>
+      <div class="sprint-info" id="sprint-info"></div>
+      <div class="sprint-actions" id="sprint-actions"></div>
+    </section>
+
+    <section class="burndown" id="burndown" aria-labelledby="burndown-title" hidden>
+      <header class="burndown-head">
+        <div class="burndown-heading">
+          <h2 id="burndown-title">Burndown</h2>
+          <p class="burndown-sub" id="burndown-sub"></p>
+        </div>
+        <span class="burndown-status" id="burndown-status"></span>
+        <div class="unit-toggle" id="unit-toggle" role="group" aria-label="Measure the burndown in">
+          <button type="button" data-unit="points">Points</button>
+          <button type="button" data-unit="tasks">Tasks</button>
+        </div>
+        <div class="burndown-legend" aria-hidden="true">
+          <span><i class="key key-remaining"></i><span id="legend-remaining">Open tasks</span></span>
+          <span><i class="key key-ideal"></i>Ideal</span>
+        </div>
+        <button class="btn btn-ghost" id="burndown-toggle" aria-expanded="true" aria-controls="burndown-body">Hide</button>
+      </header>
+      <div id="burndown-body">
+        <div class="burndown-chart" id="burndown-chart"></div>
+        <p class="burndown-note" id="burndown-note" hidden></p>
+        <details class="burndown-table">
+          <summary>View as table</summary>
+          <div class="table-wrap" id="burndown-table"></div>
+        </details>
+      </div>
+    </section>
+
+    <section class="stats" id="stats" aria-label="Board summary"></section>
+
+    <section class="toolbar" aria-label="Filters">
+      <div class="layout-switch" id="layout-switch" role="group" aria-label="Show tasks as">
+        <button type="button" data-layout="board" aria-pressed="true">Board</button>
+        <button type="button" data-layout="calendar" aria-pressed="false">Calendar</button>
+      </div>
+      <div class="search">
+        <input type="search" id="search" placeholder="Search tasks…  ( / )" aria-label="Search tasks">
+      </div>
+      <select id="filter-priority" aria-label="Filter by priority">
+        <option value="">All priorities</option>
+        <option value="urgent">Urgent</option>
+        <option value="high">High</option>
+        <option value="medium">Medium</option>
+        <option value="low">Low</option>
+      </select>
+      <select id="filter-type" aria-label="Filter by type">
+        <option value="">All types</option>
+        <option value="project">Project</option>
+        <option value="enhancement">Enhancement</option>
+        <option value="defect">Defect</option>
+        <option value="service">Service improvement item</option>
+        <option value="none">No type</option>
+      </select>
+      <select id="filter-assignee" aria-label="Filter by person"></select>
+      <select id="filter-tag" aria-label="Filter by tag"></select>
+      <select id="filter-due" aria-label="Filter by due date">
+        <option value="">Any due date</option>
+        <option value="overdue">Overdue</option>
+        <option value="soon">Due in 2 days</option>
+        <option value="none">No due date</option>
+      </select>
+      <button class="btn btn-ghost" id="clear-filters" hidden>Clear filters</button>
+    </section>
+
+    <section class="welcome" id="welcome" hidden>
+      <div>
+        <strong id="welcome-title">This team has no tasks yet</strong>
+        <p>Everyone on the team shares this board. Add the first task with <b>New task</b> or the <b>+</b> on any column, and assign it to someone so the team can see who owns it.</p>
+      </div>
+      <button class="btn" id="welcome-sample">Load sample tasks</button>
+    </section>
+
+    <section class="board" id="board" aria-label="Kanban board"></section>
+    <section class="calendar" id="calendar" aria-label="Calendar" hidden></section>
+    </div>
+  </main>
+
+  <dialog id="task-dialog" aria-labelledby="task-dialog-title">
+    <form id="task-form" method="dialog">
+      <header class="dialog-header">
+        <h2 id="task-dialog-title">New task</h2>
+        <button type="button" class="btn btn-ghost icon-btn" data-close aria-label="Close">✕</button>
+      </header>
+      <label class="field">
+        <span>Title</span>
+        <input name="title" required maxlength="200" autocomplete="off">
+      </label>
+      <label class="field">
+        <span>Description</span>
+        <textarea name="description" rows="4"></textarea>
+      </label>
+      <div class="field-row">
+        <label class="field">
+          <span>Status</span>
+          <select name="status"></select>
+        </label>
+        <label class="field">
+          <span>Priority</span>
+          <select name="priority">
+            <option value="low">Low</option>
+            <option value="medium" selected>Medium</option>
+            <option value="high">High</option>
+            <option value="urgent">Urgent</option>
+          </select>
+        </label>
+      </div>
+      <div class="field-row">
+        <label class="field">
+          <span>Due date</span>
+          <input type="date" name="dueDate">
+        </label>
+        <div class="field">
+          <span id="assignee-label">Assignee</span>
+          <div class="assignee-picker">
+            <div class="assignee-chosen" id="assignee-chosen" hidden></div>
+            <input id="assignee-input" autocomplete="off" maxlength="60" placeholder="Search people…"
+              role="combobox" aria-labelledby="assignee-label" aria-autocomplete="list"
+              aria-controls="assignee-results" aria-expanded="false">
+            <div class="assignee-results" id="assignee-results" role="listbox" hidden></div>
+          </div>
+          <button type="button" class="link-btn" id="assign-me" hidden>Assign to me</button>
+        </div>
+      </div>
+      <div class="field-row">
+        <label class="field sprint-field">
+          <span>Sprint</span>
+          <select name="sprint" id="task-sprint"></select>
+        </label>
+        <fieldset class="field type-field">
+          <legend>Type</legend>
+          <div class="type-options">
+            <label><input type="radio" name="type" value=""> None</label>
+            <label class="type-project"><input type="radio" name="type" value="project"> Project</label>
+            <label class="type-enhancement"><input type="radio" name="type" value="enhancement"> Enhancement</label>
+            <label class="type-defect"><input type="radio" name="type" value="defect"> Defect</label>
+            <label class="type-service"><input type="radio" name="type" value="service"> Service improvement item</label>
+          </div>
+        </fieldset>
+      </div>
+      <fieldset class="field points-field">
+        <legend>Story points</legend>
+        <div class="points-options" id="points-options"></div>
+      </fieldset>
+      <label class="field">
+        <span>Tags <small>(comma separated)</small></span>
+        <input name="tags" autocomplete="off" placeholder="e.g. frontend, q4">
+      </label>
+      <p class="meta" id="task-meta"></p>
+      <footer class="dialog-footer">
+        <button type="button" class="btn btn-danger" id="delete-task-btn" hidden>Delete</button>
+        <span class="spacer"></span>
+        <button type="button" class="btn btn-ghost" data-close>Cancel</button>
+        <button type="submit" class="btn btn-primary" id="save-task-btn">Create task</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="ask-dialog" class="ask-dialog" aria-labelledby="ask-title">
+    <form id="ask-form" method="dialog">
+      <h2 id="ask-title"></h2>
+      <p id="ask-message" class="ask-message"></p>
+      <input id="ask-input" name="value" autocomplete="off" maxlength="80">
+      <footer class="dialog-footer">
+        <span class="spacer"></span>
+        <button type="button" class="btn btn-ghost" id="ask-cancel">Cancel</button>
+        <button type="submit" class="btn btn-primary" id="ask-ok">OK</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="sprint-dialog" class="sprint-dialog" aria-labelledby="sprint-dialog-title">
+    <form id="sprint-form">
+      <header class="dialog-header">
+        <h2 id="sprint-dialog-title">New sprint</h2>
+        <button type="button" class="btn btn-ghost icon-btn" data-close aria-label="Close">✕</button>
+      </header>
+      <label class="field">
+        <span>Name</span>
+        <input id="sprint-name" required maxlength="60" autocomplete="off">
+      </label>
+      <div class="field-row">
+        <label class="field">
+          <span>Start date</span>
+          <input type="date" id="sprint-start" required>
+        </label>
+        <label class="field">
+          <span>End date</span>
+          <input type="date" id="sprint-end" required>
+        </label>
+      </div>
+      <label class="field">
+        <span>Point limit <small>(optional)</small></span>
+        <input type="number" id="sprint-capacity" min="0" max="999" step="0.5" inputmode="decimal" placeholder="No limit">
+        <small class="field-hint" id="sprint-velocity"></small>
+      </label>
+      <label class="field">
+        <span>Goal <small>(optional)</small></span>
+        <textarea id="sprint-goal" rows="2" maxlength="300" placeholder="What should this sprint achieve?"></textarea>
+      </label>
+      <p class="signin-error" id="sprint-error" role="alert" hidden></p>
+      <footer class="dialog-footer">
+        <button type="button" class="btn btn-danger" id="sprint-delete" hidden>Delete sprint</button>
+        <span class="spacer"></span>
+        <button type="button" class="btn btn-ghost" data-close>Cancel</button>
+        <button type="submit" class="btn btn-primary" id="sprint-save">Create sprint</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="plan-dialog" class="plan-dialog" aria-labelledby="plan-title">
+    <form id="plan-form">
+      <header class="dialog-header">
+        <h2 id="plan-title">Plan sprint</h2>
+        <button type="button" class="btn btn-ghost icon-btn" data-close aria-label="Close">✕</button>
+      </header>
+      <p class="ask-message">Tick the tasks that belong in this sprint. Unticked tasks go back to the backlog.</p>
+      <input type="search" id="plan-search" placeholder="Filter tasks…" aria-label="Filter tasks" autocomplete="off">
+      <div class="plan-list" id="plan-list"></div>
+      <footer class="dialog-footer">
+        <span class="plan-count" id="plan-count"></span>
+        <span class="spacer"></span>
+        <button type="button" class="btn btn-ghost" data-close>Cancel</button>
+        <button type="submit" class="btn btn-primary">Save plan</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="complete-dialog" class="ask-dialog" aria-labelledby="complete-title">
+    <form id="complete-form">
+      <h2 id="complete-title">Complete sprint</h2>
+      <p class="ask-message" id="complete-summary"></p>
+      <label class="field" id="complete-move-field">
+        <span>Move unfinished tasks to</span>
+        <select id="complete-move"></select>
+      </label>
+      <footer class="dialog-footer">
+        <span class="spacer"></span>
+        <button type="button" class="btn btn-ghost" data-close>Cancel</button>
+        <button type="submit" class="btn btn-primary">Complete sprint</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="reports-dialog" class="reports-dialog" aria-labelledby="reports-title">
+    <div class="reports-body">
+      <header class="dialog-header">
+        <h2 id="reports-title">Reports</h2>
+        <button type="button" class="btn btn-ghost icon-btn" data-close aria-label="Close">✕</button>
+      </header>
+      <div class="report-controls">
+        <label class="field"><span>Team</span><select id="report-team"></select></label>
+        <label class="field"><span>Tasks from</span><select id="report-view"></select></label>
+        <label class="field">
+          <span>Status</span>
+          <select id="report-state">
+            <option value="all">All tasks</option>
+            <option value="open">Open tasks only</option>
+            <option value="done">Done tasks only</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Type</span>
+          <select id="report-type">
+            <option value="">All types</option>
+            <option value="project">Project</option>
+            <option value="enhancement">Enhancement</option>
+            <option value="defect">Defect</option>
+            <option value="service">Service improvement item</option>
+            <option value="none">No type</option>
+          </select>
+        </label>
+      </div>
+      <fieldset class="report-include">
+        <legend>Include</legend>
+        <div class="report-include-options" id="report-sections"></div>
+      </fieldset>
+      <div class="report-preview" id="report-preview" aria-live="polite"></div>
+      <footer class="dialog-footer report-footer">
+        <span class="report-note" id="report-note" role="status"></span>
+        <span class="spacer"></span>
+        <button type="button" class="btn" id="export-xlsx">Export Excel</button>
+        <button type="button" class="btn btn-primary" id="export-pdf">Export PDF</button>
+      </footer>
+    </div>
+  </dialog>
+
+  <dialog id="admin-dialog" class="admin-dialog" aria-labelledby="admin-title">
+    <div class="admin-body">
+      <header class="dialog-header">
+        <h2 id="admin-title">Admin settings</h2>
+        <button type="button" class="btn btn-ghost icon-btn" data-close aria-label="Close">✕</button>
+      </header>
+      <p class="admin-role" id="admin-role"></p>
+
+      <section class="admin-section" aria-labelledby="admin-teams-title">
+        <div class="admin-section-head">
+          <h3 id="admin-teams-title">Teams</h3>
+          <button type="button" class="btn btn-primary" id="admin-new-team">+ New team</button>
+        </div>
+        <div class="table-wrap admin-table-wrap">
+          <table class="admin-table">
+            <thead>
+              <tr><th>Team</th><th>Members</th><th>Open tasks</th><th>Active sprint</th><th><span class="sr-only">Actions</span></th></tr>
+            </thead>
+            <tbody id="admin-teams"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="admin-section" aria-labelledby="admin-access-title">
+        <h3 id="admin-access-title">Who can do what</h3>
+        <ul class="admin-roles" id="admin-roles"></ul>
+      </section>
+    </div>
+  </dialog>
+
+  <dialog id="members-dialog" class="members-dialog" aria-labelledby="members-title">
+    <form id="members-form" method="dialog">
+      <header class="dialog-header">
+        <h2 id="members-title">Team members</h2>
+        <button type="button" class="btn btn-ghost icon-btn" data-close-members aria-label="Close">✕</button>
+      </header>
+      <p class="ask-message">Only members see this team’s tab and tasks. People who can edit this page see every team.</p>
+      <div class="assignee-picker">
+        <input id="member-input" autocomplete="off" maxlength="80" placeholder="Add people by name…"
+          role="combobox" aria-label="Add people by name" aria-autocomplete="list"
+          aria-controls="member-results" aria-expanded="false">
+        <div class="assignee-results" id="member-results" role="listbox" hidden></div>
+      </div>
+      <ul class="member-list" id="member-list" aria-label="Members"></ul>
+      <p class="member-empty" id="member-empty">No members yet. Until you add people, only people who can edit this page see this team.</p>
+      <button type="button" class="link-btn" id="member-add-me" hidden>Add me</button>
+      <p class="member-note">This controls what each person sees on the page. It doesn’t make a team’s tasks confidential.</p>
+      <footer class="dialog-footer">
+        <span class="spacer"></span>
+        <button type="button" class="btn btn-ghost" data-close-members>Cancel</button>
+        <button type="submit" class="btn btn-primary">Save members</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <input type="file" id="import-input" accept="application/json,.json" hidden>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

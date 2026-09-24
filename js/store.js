@@ -1,0 +1,713 @@
+// Pure state logic for the task board. No DOM access here, so it can be
+// unit-tested in Node and reused by the UI layer.
+
+export const STORAGE_KEY = 'taskflow.board.v1';
+
+export const PRIORITIES = ['low', 'medium', 'high', 'urgent'];
+
+// A task's type; '' means no type.
+export const TASK_TYPES = ['project', 'enhancement', 'defect', 'service'];
+export const TASK_TYPE_LABELS = {
+  project: 'Project',
+  enhancement: 'Enhancement',
+  defect: 'Defect',
+  service: 'Service improvement item',
+};
+// Shorter names for tight spots such as card labels.
+export const TASK_TYPE_SHORT = { ...TASK_TYPE_LABELS, service: 'Service improvement' };
+
+// Suggested story point values (a task can hold any value 0–999).
+export const POINT_SCALE = [1, 2, 3, 5, 8, 13, 21];
+
+// A story point estimate or null for "not estimated". Halves are allowed.
+export function cleanPoints(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) return null;
+  return Math.min(999, Math.round(n * 2) / 2);
+}
+
+export function sumPoints(tasks) {
+  return tasks.reduce((total, t) => total + (t.points ?? 0), 0);
+}
+
+export const DEFAULT_COLUMNS = [
+  { id: 'backlog', title: 'Backlog', wipLimit: 0 },
+  { id: 'todo', title: 'To Do', wipLimit: 0 },
+  { id: 'in-progress', title: 'In Progress', wipLimit: 3 },
+  { id: 'review', title: 'Review', wipLimit: 0 },
+  { id: 'done', title: 'Done', wipLimit: 0 },
+];
+
+export const DONE_COLUMN_ID = 'done';
+
+export function uid(prefix = 't') {
+  return `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+}
+
+export function todayISO(date = new Date()) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+export function addDays(iso, days) {
+  const [y, m, d] = iso.split('-').map(Number);
+  return todayISO(new Date(y, m - 1, d + days));
+}
+
+export function createEmptyState() {
+  return {
+    version: 1,
+    columns: DEFAULT_COLUMNS.map((c) => ({ ...c })),
+    sprints: [],
+    tasks: [],
+  };
+}
+
+export function createSampleState(today = todayISO()) {
+  let state = createEmptyState();
+  const samples = [
+    ['backlog', 'Research competitor pricing', 'Collect pricing pages for the top 5 competitors.', 'low', 12, ['research'], 'Alex', 'project'],
+    ['backlog', 'Plan Q4 roadmap', '', 'medium', 20, ['planning'], '', 'project'],
+    ['todo', 'Write onboarding email copy', 'Three-email sequence for new sign-ups.', 'medium', 4, ['marketing'], 'Sam', 'enhancement'],
+    ['todo', 'Fix login redirect bug', 'Users land on /404 after logging in from a deep link.', 'urgent', -1, ['frontend'], 'Jordan', 'defect'],
+    ['in-progress', 'Design settings page', 'Include profile, notifications and billing tabs.', 'high', 2, ['design'], 'Taylor', 'enhancement'],
+    ['in-progress', 'Set up CI pipeline', 'Run lint and tests on every pull request.', 'medium', 5, ['devops'], 'Jordan', 'project'],
+    ['review', 'API rate limiting', 'Token bucket, 100 req/min per key.', 'high', 1, ['backend'], 'Alex', 'enhancement'],
+    ['done', 'Create project repository', '', 'low', -3, ['devops'], 'Sam', 'project'],
+  ];
+  const samplePoints = [3, 5, 2, 3, 8, 5, 5, 1];
+  for (const [i, [status, title, description, priority, dueOffset, tags, assignee, type]] of samples.entries()) {
+    state = addTask(state, {
+      status, title, description, priority, tags, assignee, type, points: samplePoints[i],
+      dueDate: addDays(today, dueOffset),
+    });
+  }
+  return state;
+}
+
+// ---------- persistence ----------
+
+// `key` lets each signed-in user keep a separate board in the same browser.
+export function loadState(storage, key = STORAGE_KEY) {
+  try {
+    const raw = storage?.getItem(key);
+    if (!raw) return null;
+    return normalizeState(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+}
+
+export function saveState(storage, state, key = STORAGE_KEY) {
+  try {
+    storage?.setItem(key, JSON.stringify(state));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Validates and repairs a state object (e.g. from an imported file).
+// Throws if the input is not recognisably a board.
+export function normalizeState(input) {
+  if (!input || typeof input !== 'object' || !Array.isArray(input.tasks)) {
+    throw new Error('Invalid board data: missing "tasks" array.');
+  }
+  const columns = Array.isArray(input.columns) && input.columns.length
+    ? input.columns
+      .filter((c) => c && typeof c.id === 'string')
+      .map((c) => ({
+        id: c.id,
+        title: String(c.title ?? c.id),
+        wipLimit: Math.max(0, Number(c.wipLimit) || 0),
+      }))
+    : createEmptyState().columns;
+  const columnIds = new Set(columns.map((c) => c.id));
+  const sprints = sortSprints((Array.isArray(input.sprints) ? input.sprints : [])
+    .filter((sp) => sp && typeof sp.id === 'string' && sp.id)
+    .map(normalizeSprint));
+  const sprintIds = new Set(sprints.map((sp) => sp.id));
+  const tasks = input.tasks
+    .filter((t) => t && typeof t.title === 'string')
+    .map((t) => normalizeTask(t, columnIds.has(t.status) ? t.status : columns[0].id))
+    .map((t) => (sprintIds.has(t.sprintId) ? t : { ...t, sprintId: '' }));
+  return { version: 1, columns, sprints, tasks: reindex(tasks, columns) };
+}
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+export const SPRINT_STATUSES = ['planned', 'active', 'completed'];
+
+function normalizeSprint(sp) {
+  const startDate = ISO_DATE.test(sp.startDate ?? '') ? sp.startDate : '';
+  let endDate = ISO_DATE.test(sp.endDate ?? '') ? sp.endDate : '';
+  if (startDate && endDate && endDate < startDate) endDate = startDate;
+  return {
+    id: sp.id,
+    name: String(sp.name ?? '').trim().slice(0, 60) || 'Sprint',
+    goal: String(sp.goal ?? '').trim().slice(0, 300),
+    startDate,
+    endDate,
+    status: SPRINT_STATUSES.includes(sp.status) ? sp.status : 'planned',
+    // Story point limit for the sprint; null means no limit.
+    capacity: cleanPoints(sp.capacity) || null,
+    completedAt: sp.completedAt || null,
+    // The local day it was completed, for the burndown.
+    completedOn: ISO_DATE.test(sp.completedOn ?? '') ? sp.completedOn
+      : sp.completedAt ? todayISO(new Date(sp.completedAt)) : null,
+    burndown: normalizeBurndown(sp.burndown),
+  };
+}
+
+// Daily snapshots: { 'YYYY-MM-DD': { remaining, total } }.
+function normalizeBurndown(input) {
+  const out = {};
+  if (!input || typeof input !== 'object') return out;
+  const count = (n) => (Number.isFinite(n) && n >= 0 ? Math.round(n) : null);
+  for (const [day, v] of Object.entries(input).sort().slice(-400)) {
+    const remaining = count(v?.remaining);
+    const total = count(v?.total);
+    if (!ISO_DATE.test(day) || remaining === null || total === null) continue;
+    out[day] = { remaining, total };
+    // Point counts were added later; older snapshots don't have them.
+    const remainingPoints = cleanPoints(v.remainingPoints);
+    const totalPoints = cleanPoints(v.totalPoints);
+    if (remainingPoints !== null && totalPoints !== null) Object.assign(out[day], { remainingPoints, totalPoints });
+  }
+  return out;
+}
+
+export function sortSprints(sprints) {
+  return [...sprints].sort((a, b) => (a.startDate || '9999').localeCompare(b.startDate || '9999')
+    || a.name.localeCompare(b.name, undefined, { numeric: true }));
+}
+
+function normalizeTask(t, status) {
+  const now = new Date().toISOString();
+  return {
+    id: typeof t.id === 'string' && t.id ? t.id : uid(),
+    title: t.title.trim() || 'Untitled task',
+    description: String(t.description ?? ''),
+    status,
+    priority: PRIORITIES.includes(t.priority) ? t.priority : 'medium',
+    type: TASK_TYPES.includes(t.type) ? t.type : '',
+    sprintId: String(t.sprintId ?? ''),
+    points: cleanPoints(t.points),
+    dueDate: /^\d{4}-\d{2}-\d{2}$/.test(t.dueDate ?? '') ? t.dueDate : '',
+    tags: normalizeTags(t.tags),
+    // assigneeId is a person's account id (hosted on claude.ai); assignee
+    // is a free-text name, used when accounts aren't available.
+    assigneeId: String(t.assigneeId ?? '').trim(),
+    assignee: String(t.assignee ?? '').trim(),
+    order: Number.isFinite(t.order) ? t.order : 0,
+    createdAt: t.createdAt || now,
+    updatedAt: t.updatedAt || now,
+    completedAt: t.completedAt || null,
+  };
+}
+
+export function normalizeTags(tags) {
+  const list = Array.isArray(tags) ? tags : String(tags ?? '').split(',');
+  const seen = new Set();
+  const out = [];
+  for (const raw of list) {
+    const tag = String(raw).trim().toLowerCase();
+    if (tag && !seen.has(tag)) {
+      seen.add(tag);
+      out.push(tag);
+    }
+  }
+  return out;
+}
+
+// Rewrites `order` so each column's tasks are numbered 0..n-1.
+function reindex(tasks, columns) {
+  const byColumn = new Map(columns.map((c) => [c.id, []]));
+  for (const t of tasks) byColumn.get(t.status)?.push(t);
+  const out = [];
+  for (const list of byColumn.values()) {
+    list.sort((a, b) => a.order - b.order);
+    list.forEach((t, i) => out.push({ ...t, order: i }));
+  }
+  return out;
+}
+
+// ---------- queries ----------
+
+export function tasksInColumn(state, columnId) {
+  return state.tasks
+    .filter((t) => t.status === columnId)
+    .sort((a, b) => a.order - b.order);
+}
+
+export function getTask(state, id) {
+  return state.tasks.find((t) => t.id === id) ?? null;
+}
+
+export function isOverdue(task, today = todayISO()) {
+  return Boolean(task.dueDate) && task.status !== DONE_COLUMN_ID && task.dueDate < today;
+}
+
+export function isDueSoon(task, today = todayISO(), days = 2) {
+  return Boolean(task.dueDate)
+    && task.status !== DONE_COLUMN_ID
+    && task.dueDate >= today
+    && task.dueDate <= addDays(today, days);
+}
+
+export function allTags(state) {
+  return [...new Set(state.tasks.flatMap((t) => t.tags))].sort();
+}
+
+// One key per assignee: "id:<account id>" or "name:<free text>".
+export function assigneeKey(task) {
+  if (task.assigneeId) return `id:${task.assigneeId}`;
+  if (task.assignee) return `name:${task.assignee}`;
+  return '';
+}
+
+export function allAssigneeKeys(state) {
+  return [...new Set(state.tasks.map(assigneeKey).filter(Boolean))];
+}
+
+// Open (not done) task counts per assignee key; '' counts unassigned.
+export function workload(state) {
+  const counts = new Map();
+  for (const t of state.tasks) {
+    if (t.status === DONE_COLUMN_ID) continue;
+    const key = assigneeKey(t);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return counts;
+}
+
+// filter.assignee: '' (anyone), 'me', 'none', or an assigneeKey.
+// people.meKeys lists the keys that mean "me"; people.nameOf(task) gives
+// the assignee's display name so search can match it.
+export function matchesFilter(task, filter = {}, today = todayISO(), people = {}) {
+  const { query = '', priority = '', type = '', tag = '', assignee = '', due = '' } = filter;
+  const { meKeys = [], nameOf = (t) => t.assignee } = people;
+  if (priority && task.priority !== priority) return false;
+  if (type === 'none' && task.type) return false;
+  if (type && type !== 'none' && task.type !== type) return false;
+  if (tag && !task.tags.includes(tag)) return false;
+  const key = assigneeKey(task);
+  if (assignee === 'none' && key) return false;
+  if (assignee === 'me' && !meKeys.includes(key)) return false;
+  if (assignee && assignee !== 'none' && assignee !== 'me' && key !== assignee) return false;
+  if (due === 'overdue' && !isOverdue(task, today)) return false;
+  if (due === 'soon' && !isDueSoon(task, today)) return false;
+  if (due === 'none' && task.dueDate) return false;
+  const q = query.trim().toLowerCase();
+  if (q) {
+    const haystack = [task.title, task.description, nameOf(task), TASK_TYPE_LABELS[task.type] ?? '', ...task.tags]
+      .join(' ').toLowerCase();
+    if (!haystack.includes(q)) return false;
+  }
+  return true;
+}
+
+export function getStats(state, today = todayISO()) {
+  const total = state.tasks.length;
+  const done = state.tasks.filter((t) => t.status === DONE_COLUMN_ID).length;
+  const overdue = state.tasks.filter((t) => isOverdue(t, today)).length;
+  const dueSoon = state.tasks.filter((t) => isDueSoon(t, today)).length;
+  const byColumn = Object.fromEntries(
+    state.columns.map((c) => [c.id, state.tasks.filter((t) => t.status === c.id).length]),
+  );
+  const byType = Object.fromEntries(
+    TASK_TYPES.map((k) => [k, state.tasks.filter((t) => t.type === k && t.status !== DONE_COLUMN_ID).length]),
+  );
+  const byPriority = Object.fromEntries(
+    PRIORITIES.map((p) => [p, state.tasks.filter((t) => t.priority === p && t.status !== DONE_COLUMN_ID).length]),
+  );
+  return {
+    total,
+    done,
+    open: total - done,
+    overdue,
+    dueSoon,
+    completion: total ? Math.round((done / total) * 100) : 0,
+    byColumn,
+    byPriority,
+    byType,
+  };
+}
+
+// ---------- task mutations (return a new state) ----------
+
+// ---------- sprints ----------
+// Sprints belong to a board (so each team has its own). A task is in at
+// most one sprint (task.sprintId); '' means it's in the backlog.
+
+export const sprintsOf = (state) => state.sprints ?? [];
+
+export function getSprint(state, id) {
+  return sprintsOf(state).find((sp) => sp.id === id) ?? null;
+}
+
+export function activeSprint(state) {
+  return sprintsOf(state).find((sp) => sp.status === 'active') ?? null;
+}
+
+// Suggested name and dates for the next sprint: two weeks, starting the
+// day after the latest sprint ends (or today).
+export function nextSprintDefaults(state, today = todayISO(), lengthDays = 14) {
+  const ends = sprintsOf(state).map((sp) => sp.endDate).filter(Boolean).sort();
+  const afterLast = ends.length ? addDays(ends[ends.length - 1], 1) : today;
+  const startDate = afterLast > today ? afterLast : today;
+  const numbers = sprintsOf(state).map((sp) => Number(/(\d+)\s*$/.exec(sp.name)?.[1])).filter(Number.isFinite);
+  const next = numbers.length ? Math.max(...numbers) + 1 : sprintsOf(state).length + 1;
+  return { name: `Sprint ${next}`, startDate, endDate: addDays(startDate, lengthDays - 1), goal: '' };
+}
+
+export function addSprint(state, fields = {}) {
+  const sprint = normalizeSprint({ ...nextSprintDefaults(state), ...fields, id: uid('s'), status: 'planned' });
+  return { ...state, sprints: sortSprints([...sprintsOf(state), sprint]) };
+}
+
+export function updateSprint(state, id, fields) {
+  return {
+    ...state,
+    sprints: sortSprints(sprintsOf(state).map((sp) => (sp.id === id
+      ? normalizeSprint({
+        ...sp, ...fields, id, status: sp.status, completedAt: sp.completedAt, completedOn: sp.completedOn, burndown: sp.burndown,
+      })
+      : sp))),
+  };
+}
+
+// Only one sprint can be active; returns the state unchanged otherwise.
+export function startSprint(state, id, today = todayISO()) {
+  const sprint = getSprint(state, id);
+  if (!sprint || sprint.status !== 'planned' || activeSprint(state)) return state;
+  return withSnapshot({
+    ...state,
+    sprints: sprintsOf(state).map((sp) => (sp.id === id ? { ...sp, status: 'active' } : sp)),
+  }, id, today);
+}
+
+export function sprintCounts(state, sprintId) {
+  const tasks = tasksInView(state, sprintId);
+  const open = tasks.filter((t) => t.status !== DONE_COLUMN_ID);
+  return {
+    total: tasks.length,
+    remaining: open.length,
+    totalPoints: sumPoints(tasks),
+    remainingPoints: sumPoints(open),
+  };
+}
+
+// Points planned vs the sprint's limit. over > 0 when above the limit.
+export function sprintLoad(state, sprintId) {
+  const sprint = getSprint(state, sprintId);
+  const planned = sumPoints(tasksInView(state, sprintId));
+  const capacity = sprint?.capacity ?? null;
+  return { planned, capacity, over: capacity ? Math.max(0, planned - capacity) : 0 };
+}
+
+// Average story points finished in the last few completed sprints.
+export function velocity(state, last = 3) {
+  const done = sprintsOf(state)
+    .filter((sp) => sp.status === 'completed')
+    .sort((a, b) => (a.completedOn ?? '').localeCompare(b.completedOn ?? ''))
+    .slice(-last)
+    .map((sp) => sumPoints(tasksInView(state, sp.id).filter((t) => t.status === DONE_COLUMN_ID)));
+  return done.length ? { average: Math.round((done.reduce((a, b) => a + b, 0) / done.length) * 2) / 2, sprints: done.length } : null;
+}
+
+function withSnapshot(state, sprintId, day) {
+  const sprint = getSprint(state, sprintId);
+  if (!sprint) return state;
+  const counts = sprintCounts(state, sprintId);
+  const prev = sprint.burndown?.[day];
+  if (prev && ['remaining', 'total', 'remainingPoints', 'totalPoints'].every((k) => prev[k] === counts[k])) return state;
+  return {
+    ...state,
+    sprints: sprintsOf(state).map((sp) => (sp.id === sprintId
+      ? { ...sp, burndown: { ...sp.burndown, [day]: counts } }
+      : sp)),
+  };
+}
+
+// Records today's open/total task counts for the active sprint. Called on
+// every board change, so the burndown keeps real history, including
+// tasks added to or removed from the sprint along the way.
+export function recordBurndown(state, today = todayISO()) {
+  const sprint = activeSprint(state);
+  if (!sprint || (sprint.startDate && today < sprint.startDate)) return state;
+  return withSnapshot(state, sprint.id, today);
+}
+
+// Chart data for a sprint's burndown, one point per day from the start
+// date to the end date (or to today / completion, if later):
+//   { date, remaining, total, ideal, estimated,
+//     remainingPoints, totalPoints, idealPoints, pointsEstimated }
+// remaining/total are null for days that haven't happened yet. Days with
+// no snapshot carry the last snapshot forward; days before the first
+// snapshot are estimated from when the sprint's tasks were completed.
+export function burndownSeries(state, sprintId, today = todayISO()) {
+  const sprint = getSprint(state, sprintId);
+  if (!sprint?.startDate || !sprint.endDate) return null;
+  const history = sprint.burndown ?? {};
+  const tasks = tasksInView(state, sprintId);
+  const live = sprint.status !== 'completed';
+  const completedDay = sprint.completedOn ?? sprint.endDate;
+  const lastActual = live ? today : completedDay;
+  const lastDay = [sprint.endDate, lastActual < sprint.startDate ? sprint.startDate : lastActual].sort()[1];
+  const plannedDays = Math.max(1, daysLeft(sprint, sprint.startDate));
+  const doneBy = (t, day) => t.status === DONE_COLUMN_ID && t.completedAt && todayISO(new Date(t.completedAt)) <= day;
+
+  const estimate = (day) => {
+    const open = tasks.filter((t) => !doneBy(t, day));
+    return { total: tasks.length, remaining: open.length, totalPoints: sumPoints(tasks), remainingPoints: sumPoints(open) };
+  };
+
+  const points = [];
+  let carried = null;
+  let startTotal = null;
+  let startPoints = null;
+  for (let day = sprint.startDate, i = 0; day <= lastDay; day = addDays(day, 1), i++) {
+    let counts = null;
+    let estimated = false;
+    if (day <= lastActual) {
+      if (live && day === today) {
+        counts = sprintCounts(state, sprintId);
+      } else if (history[day]) {
+        counts = history[day];
+        carried = counts;
+      } else if (carried) {
+        counts = carried;
+      } else {
+        counts = estimate(day);
+        estimated = true;
+      }
+    }
+    // Snapshots from before points were tracked: estimate the points.
+    let pointsEstimated = estimated;
+    let pointCounts = counts;
+    if (counts && counts.remainingPoints === undefined) {
+      pointCounts = estimate(day);
+      pointsEstimated = true;
+    }
+    if (i === 0) {
+      startTotal = counts?.total ?? tasks.length;
+      startPoints = pointCounts?.totalPoints ?? sumPoints(tasks);
+    }
+    const share = i >= plannedDays - 1 ? 0 : 1 - i / (plannedDays - 1);
+    points.push({
+      date: day,
+      remaining: counts?.remaining ?? null,
+      total: counts?.total ?? null,
+      ideal: Math.round(startTotal * share * 10) / 10,
+      estimated,
+      remainingPoints: pointCounts?.remainingPoints ?? null,
+      totalPoints: pointCounts?.totalPoints ?? null,
+      idealPoints: Math.round(startPoints * share * 10) / 10,
+      pointsEstimated,
+    });
+  }
+  return points;
+}
+
+// Completes a sprint. Done tasks stay in it as a record; unfinished ones
+// move to `moveTo` (another sprint's id, or '' for the backlog). The
+// final open count is kept for the burndown before anything moves.
+export function completeSprint(state, id, moveTo = '', today = todayISO()) {
+  if (!getSprint(state, id) || getSprint(state, id).status === 'completed') return state;
+  const target = moveTo && getSprint(state, moveTo)?.status !== 'completed' && moveTo !== id ? moveTo : '';
+  state = withSnapshot(state, id, today);
+  return {
+    ...state,
+    sprints: sprintsOf(state).map((sp) => (sp.id === id
+      ? { ...sp, status: 'completed', completedAt: new Date().toISOString(), completedOn: today }
+      : sp)),
+    tasks: state.tasks.map((t) => (t.sprintId === id && t.status !== DONE_COLUMN_ID ? { ...t, sprintId: target } : t)),
+  };
+}
+
+// Deletes a sprint; its tasks go back to the backlog.
+export function deleteSprint(state, id) {
+  if (!getSprint(state, id)) return state;
+  return {
+    ...state,
+    sprints: sprintsOf(state).filter((sp) => sp.id !== id),
+    tasks: state.tasks.map((t) => (t.sprintId === id ? { ...t, sprintId: '' } : t)),
+  };
+}
+
+// Sprint planning: exactly `taskIds` end up in the sprint; tasks that
+// were in it but aren't listed go back to the backlog.
+export function setSprintTasks(state, sprintId, taskIds) {
+  if (!getSprint(state, sprintId)) return state;
+  const chosen = new Set(taskIds);
+  return {
+    ...state,
+    tasks: state.tasks.map((t) => {
+      if (chosen.has(t.id)) return t.sprintId === sprintId ? t : { ...t, sprintId };
+      return t.sprintId === sprintId ? { ...t, sprintId: '' } : t;
+    }),
+  };
+}
+
+// The tasks shown for a sprint view: 'all', 'backlog' or a sprint id.
+export function tasksInView(state, view) {
+  if (view === 'backlog') return state.tasks.filter((t) => !t.sprintId);
+  if (view && view !== 'all') return state.tasks.filter((t) => t.sprintId === view);
+  return state.tasks;
+}
+
+// Days from `today` to the sprint's last day, inclusive; negative once over.
+export function daysLeft(sprint, today = todayISO()) {
+  if (!sprint?.endDate) return null;
+  const toDate = (iso) => {
+    const [y, m, d] = iso.split('-').map(Number);
+    return Date.UTC(y, m - 1, d);
+  };
+  return Math.round((toDate(sprint.endDate) - toDate(today)) / 86400000) + 1;
+}
+
+// ---------- calendar ----------
+
+// The weeks shown for a month: full weeks starting on `firstDay`
+// (0 = Sunday ... 6 = Saturday), covering every day of the month.
+// Returns [[isoDate x7], ...] (5 or 6 weeks, sometimes 4 in February).
+export function monthGrid(year, month, firstDay = 1) {
+  const first = new Date(year, month, 1);
+  const offset = (first.getDay() - firstDay + 7) % 7;
+  const last = new Date(year, month + 1, 0).getDate();
+  const cells = Math.ceil((offset + last) / 7) * 7;
+  const weeks = [];
+  for (let i = 0; i < cells; i++) {
+    if (i % 7 === 0) weeks.push([]);
+    weeks[weeks.length - 1].push(todayISO(new Date(year, month, 1 - offset + i)));
+  }
+  return weeks;
+}
+
+const PRIORITY_RANK = { urgent: 0, high: 1, medium: 2, low: 3 };
+
+// Tasks with a due date grouped by that date; each day lists open tasks
+// first, then by priority, then by title.
+export function tasksByDueDate(tasks) {
+  const days = new Map();
+  for (const t of tasks) {
+    if (!t.dueDate) continue;
+    if (!days.has(t.dueDate)) days.set(t.dueDate, []);
+    days.get(t.dueDate).push(t);
+  }
+  for (const list of days.values()) {
+    list.sort((a, b) => (a.status === DONE_COLUMN_ID) - (b.status === DONE_COLUMN_ID)
+      || PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority]
+      || a.title.localeCompare(b.title));
+  }
+  return days;
+}
+
+export function addTask(state, fields) {
+  const status = state.columns.some((c) => c.id === fields.status) ? fields.status : state.columns[0].id;
+  const now = new Date().toISOString();
+  const task = normalizeTask({
+    ...fields,
+    id: uid(),
+    order: tasksInColumn(state, status).length,
+    createdAt: now,
+    updatedAt: now,
+    completedAt: status === DONE_COLUMN_ID ? now : null,
+  }, status);
+  return { ...state, tasks: [...state.tasks, task] };
+}
+
+export function updateTask(state, id, fields) {
+  const existing = getTask(state, id);
+  if (!existing) return state;
+  const { status, ...rest } = fields;
+  let next = {
+    ...state,
+    tasks: state.tasks.map((t) => (t.id === id
+      ? normalizeTask({ ...t, ...rest, id, updatedAt: new Date().toISOString() }, t.status)
+      : t)),
+  };
+  if (status && status !== existing.status) {
+    next = moveTask(next, id, status, tasksInColumn(next, status).length);
+  }
+  return next;
+}
+
+export function deleteTask(state, id) {
+  const task = getTask(state, id);
+  if (!task) return state;
+  return { ...state, tasks: reindex(state.tasks.filter((t) => t.id !== id), state.columns) };
+}
+
+// Moves a task to `toColumn` at position `toIndex` (index among that
+// column's tasks *excluding* the moved task).
+export function moveTask(state, id, toColumn, toIndex = Infinity) {
+  const task = getTask(state, id);
+  if (!task || !state.columns.some((c) => c.id === toColumn)) return state;
+
+  const target = tasksInColumn(state, toColumn).filter((t) => t.id !== id);
+  const index = Math.max(0, Math.min(toIndex, target.length));
+  const now = new Date().toISOString();
+  const statusChanged = task.status !== toColumn;
+  const moved = {
+    ...task,
+    status: toColumn,
+    updatedAt: statusChanged ? now : task.updatedAt,
+    completedAt: toColumn === DONE_COLUMN_ID ? (task.completedAt ?? now) : null,
+  };
+  target.splice(index, 0, moved);
+  const newOrder = new Map(target.map((t, i) => [t.id, i]));
+
+  const tasks = state.tasks.map((t) => {
+    if (t.id === id) return { ...moved, order: newOrder.get(id) };
+    if (newOrder.has(t.id)) return { ...t, order: newOrder.get(t.id) };
+    return t;
+  });
+  return { ...state, tasks: reindex(tasks, state.columns) };
+}
+
+// ---------- column mutations ----------
+
+export function addColumn(state, title) {
+  const clean = String(title ?? '').trim();
+  if (!clean) return state;
+  const column = { id: uid('c'), title: clean, wipLimit: 0 };
+  // Keep "Done" as the last column so it stays the terminal state.
+  const doneIndex = state.columns.findIndex((c) => c.id === DONE_COLUMN_ID);
+  const columns = [...state.columns];
+  columns.splice(doneIndex === -1 ? columns.length : doneIndex, 0, column);
+  return { ...state, columns };
+}
+
+export function updateColumn(state, id, fields) {
+  return {
+    ...state,
+    columns: state.columns.map((c) => (c.id === id
+      ? {
+        ...c,
+        title: fields.title !== undefined ? (String(fields.title).trim() || c.title) : c.title,
+        wipLimit: fields.wipLimit !== undefined ? Math.max(0, Number(fields.wipLimit) || 0) : c.wipLimit,
+      }
+      : c)),
+  };
+}
+
+// Removes a column; its tasks move to the first remaining column.
+// The last column and the Done column cannot be removed.
+export function deleteColumn(state, id) {
+  if (id === DONE_COLUMN_ID || state.columns.length <= 1) return state;
+  const columns = state.columns.filter((c) => c.id !== id);
+  if (columns.length === state.columns.length) return state;
+  const fallback = columns[0].id;
+  const offset = tasksInColumn(state, fallback).length;
+  const tasks = state.tasks.map((t) => (t.status === id ? { ...t, status: fallback, order: offset + t.order } : t));
+  return { ...state, columns, tasks: reindex(tasks, columns) };
+}
+
+export function isOverWip(state, columnId) {
+  const column = state.columns.find((c) => c.id === columnId);
+  return Boolean(column?.wipLimit) && tasksInColumn(state, columnId).length > column.wipLimit;
+}
