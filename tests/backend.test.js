@@ -111,3 +111,18 @@ test('members are de-duplicated and saved per team', async () => {
   await backend.setMembers(id, ['u_1', 'u_2', 'u_2']);
   assert.deepEqual(lastTeams(backend).find((t) => t.id === id).members, ['u_1', 'u_2']);
 });
+
+test('fetchBoard returns a team board, or an empty one when missing', async () => {
+  const storage = memoryStorage();
+  const local = createLocalBackend(storage, null);
+  const id = await local.createTeam('Ops');
+  local.saveBoard(id, addTask(createEmptyState(), { title: 'Patch servers', status: 'todo' }));
+  assert.deepEqual((await local.fetchBoard(id)).tasks.map((t) => t.title), ['Patch servers']);
+  assert.deepEqual((await local.fetchBoard('missing')).tasks, []);
+
+  const docs = { 'boards/a': { tasks: [{ title: 'Remote task', status: 'todo' }] } };
+  const db = { doc: (path) => ({ get: async () => ({ exists: path in docs, data: () => docs[path] }) }) };
+  const cloud = createCloudBackend(db, memoryStorage());
+  assert.deepEqual((await cloud.fetchBoard('a')).tasks.map((t) => t.title), ['Remote task']);
+  assert.deepEqual((await cloud.fetchBoard('b')).tasks, []);
+});

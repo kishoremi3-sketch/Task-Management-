@@ -9,6 +9,7 @@
 //                          remotely; returns unsubscribe
 //   saveBoard(teamId, state)
 //   cachedBoard(teamId) this browser's last copy of the board, or null
+//   fetchBoard(teamId)  resolves the team's current board (for summaries)
 //
 // Boards live apart from the team list so renaming a team and editing
 // its tasks never overwrite each other.
@@ -129,6 +130,9 @@ export function createLocalBackend(storage, events = globalThis.window) {
     cachedBoard(teamId) {
       return loadState(storage, boardKey(teamId));
     },
+    async fetchBoard(teamId) {
+      return loadState(storage, boardKey(teamId)) ?? createEmptyState();
+    },
   };
 }
 
@@ -233,6 +237,15 @@ export function createCloudBackend(db, storage, { onStatus = () => {}, onWriteEr
     },
     cachedBoard(teamId) {
       return loadState(storage, boardKey(teamId));
+    },
+    async fetchBoard(teamId) {
+      const snap = await db.doc(`boards/${teamId}`).get();
+      if (!snap.exists) return createEmptyState();
+      try {
+        return normalizeState(snap.data());
+      } catch {
+        return createEmptyState();
+      }
     },
   };
 }

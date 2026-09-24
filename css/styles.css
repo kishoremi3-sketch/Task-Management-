@@ -721,6 +721,48 @@ body:not([data-view="signin"]) .signin { display: none; }
 .member-faces .avatar + .avatar { margin-left: -6px; }
 .member-none { color: var(--muted); font-weight: 400; font-style: italic; }
 
+/* ---------- admin ---------- */
+
+.admin-badge {
+  align-self: flex-start;
+  margin: 2px 0;
+  padding: 1px 8px;
+  border-radius: 99px;
+  background: color-mix(in srgb, var(--primary) 14%, transparent);
+  color: var(--primary) !important;
+  font-size: 11px !important;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.admin-dialog { width: min(760px, calc(100vw - 32px)); }
+.admin-body { display: flex; flex-direction: column; gap: 16px; padding: 18px 20px 22px; }
+.admin-role { margin: 0; color: var(--muted); }
+.admin-section { display: flex; flex-direction: column; gap: 8px; }
+.admin-section h3 { margin: 0; font-size: 14px; }
+.admin-section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.admin-section-head .btn { padding: 6px 12px; }
+
+.admin-table-wrap { max-height: 340px; margin-top: 0; }
+.admin-table { font-size: 13px; }
+.admin-table td, .admin-table th { vertical-align: middle; }
+.admin-table td:first-child { font-weight: 600; white-space: normal; overflow-wrap: anywhere; min-width: 120px; }
+.admin-table .muted { color: var(--muted); font-weight: 400; }
+.admin-table .row-actions { display: flex; justify-content: flex-end; gap: 4px; }
+.admin-table .row-actions .btn { padding: 4px 10px; font-size: 12px; border-color: var(--border); background: var(--surface); }
+.admin-table .row-actions .btn:hover { background: var(--surface-2); }
+.admin-table .row-actions .btn-danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 50%, var(--border)); }
+.admin-table .row-actions .btn-danger:hover { background: var(--danger); color: var(--surface); }
+.admin-table .is-current td:first-child::after { content: " (open)"; color: var(--muted); font-weight: 400; }
+
+.admin-roles { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.admin-roles li { padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; }
+.admin-roles strong { display: block; margin-bottom: 2px; }
+.admin-roles span { color: var(--muted); font-size: 13px; }
+
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
 /* ---------- team members dialog ---------- */
 
 .members-dialog { width: min(460px, calc(100vw - 32px)); }

@@ -46,9 +46,11 @@
         <div class="menu-list account-menu" id="account-menu" role="menu" hidden>
           <div class="account-card">
             <strong id="account-menu-name"></strong>
+            <span class="admin-badge" id="admin-badge" hidden>Admin</span>
             <span id="account-menu-detail"></span>
-            <span class="account-note">Everyone with access to this page can see every team’s board.</span>
+            <span class="account-note" id="account-note"></span>
           </div>
+          <button role="menuitem" id="admin-btn" hidden>Admin settings</button>
           <button role="menuitem" id="sign-out-btn" hidden>Sign out</button>
         </div>
       </div>
@@ -319,6 +321,36 @@
         <button type="submit" class="btn btn-primary">Complete sprint</button>
       </footer>
     </form>
+  </dialog>
+
+  <dialog id="admin-dialog" class="admin-dialog" aria-labelledby="admin-title">
+    <div class="admin-body">
+      <header class="dialog-header">
+        <h2 id="admin-title">Admin settings</h2>
+        <button type="button" class="btn btn-ghost icon-btn" data-close aria-label="Close">✕</button>
+      </header>
+      <p class="admin-role" id="admin-role"></p>
+
+      <section class="admin-section" aria-labelledby="admin-teams-title">
+        <div class="admin-section-head">
+          <h3 id="admin-teams-title">Teams</h3>
+          <button type="button" class="btn btn-primary" id="admin-new-team">+ New team</button>
+        </div>
+        <div class="table-wrap admin-table-wrap">
+          <table class="admin-table">
+            <thead>
+              <tr><th>Team</th><th>Members</th><th>Open tasks</th><th>Active sprint</th><th><span class="sr-only">Actions</span></th></tr>
+            </thead>
+            <tbody id="admin-teams"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="admin-section" aria-labelledby="admin-access-title">
+        <h3 id="admin-access-title">Who can do what</h3>
+        <ul class="admin-roles" id="admin-roles"></ul>
+      </section>
+    </div>
   </dialog>
 
   <dialog id="members-dialog" class="members-dialog" aria-labelledby="members-title">

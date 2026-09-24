@@ -194,6 +194,7 @@ function onTeams(list) {
   allTeams = list;
   teams = visibleTeams(list, { userId: identity?.id, canManage: canManageTeams });
   teamsLoaded = true;
+  if (adminDialog.open) loadBoardSummaries();
   // A team we just created may not be in the list for a moment; once it
   // shows up, treat it like any other team.
   if (teams.some((t) => t.id === createdTeamId)) createdTeamId = null;
@@ -262,41 +263,146 @@ async function promptNewTeam() {
   }
 }
 
+async function renameTeamFlow(team) {
+  const name = cleanTeamName(await ask({ title: 'Rename team', value: team.name, okLabel: 'Rename' }));
+  if (!name || name === team.name) return;
+  try {
+    await backend.renameTeam(team.id, name);
+    if (backend.kind === 'cloud') {
+      teams = teams.map((t) => (t.id === team.id ? { ...t, name } : t));
+      allTeams = allTeams.map((t) => (t.id === team.id ? { ...t, name } : t));
+      renderTeams();
+      if ($('#admin-dialog').open) renderAdmin();
+    }
+  } catch (err) {
+    toast(`Couldn’t rename the team: ${err?.message ?? 'unknown error'}`);
+  }
+}
+
+// taskCount: the number of tasks on the team's board, when known.
+async function deleteTeamFlow(team, taskCount = team.id === teamId ? state.tasks.length : null) {
+  const ok = await ask({
+    title: `Delete “${team.name}”?`,
+    message: `${taskCount === null ? 'Its board' : `Its board and ${taskCount} task(s)`} will be deleted for everyone. This can’t be undone.`,
+    okLabel: 'Delete team',
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    if (createdTeamId === team.id) createdTeamId = null;
+    await backend.deleteTeam(team.id);
+    toast(`Deleted team “${team.name}”`);
+  } catch (err) {
+    toast(`Couldn’t delete the team: ${err?.message ?? 'unknown error'}`);
+  }
+}
+
 function openTeamMenu(anchor, team) {
   showPopupMenu(anchor, [
     ...(membersEnabled() ? [['Manage members…', () => openMembersDialog(team)]] : []),
-    ['Rename team', async () => {
-      const name = cleanTeamName(await ask({ title: 'Rename team', value: team.name, okLabel: 'Rename' }));
-      if (!name || name === team.name) return;
-      try {
-        await backend.renameTeam(team.id, name);
-        if (backend.kind === 'cloud') {
-          teams = teams.map((t) => (t.id === team.id ? { ...t, name } : t));
-          renderTeams();
-        }
-      } catch (err) {
-        toast(`Couldn’t rename the team: ${err?.message ?? 'unknown error'}`);
-      }
-    }],
-    ['Delete team', async () => {
-      const n = team.id === teamId ? state.tasks.length : null;
-      const ok = await ask({
-        title: `Delete “${team.name}”?`,
-        message: `${n === null ? 'Its board' : `Its board and ${n} task(s)`} will be deleted for everyone. This can’t be undone.`,
-        okLabel: 'Delete team',
-        danger: true,
-      });
-      if (!ok) return;
-      try {
-        if (createdTeamId === team.id) createdTeamId = null;
-        await backend.deleteTeam(team.id);
-        toast(`Deleted team “${team.name}”`);
-      } catch (err) {
-        toast(`Couldn’t delete the team: ${err?.message ?? 'unknown error'}`);
-      }
-    }, 'danger'],
+    ['Rename team', () => renameTeamFlow(team)],
+    ['Delete team', () => deleteTeamFlow(team), 'danger'],
   ]);
 }
+
+// ---------- admin settings ----------
+// For people who manage teams: the page owner and anyone with "Can edit"
+// access when hosted on claude.ai; everyone in a self-hosted copy.
+
+const adminDialog = $('#admin-dialog');
+const boardSummaries = new Map(); // team id -> { open, total, sprint } | 'loading' | 'error'
+
+function openAdmin() {
+  closePopups();
+  boardSummaries.clear();
+  renderAdmin();
+  adminDialog.showModal();
+  loadBoardSummaries();
+}
+
+async function loadBoardSummaries() {
+  const pending = allTeams.filter((t) => !boardSummaries.has(t.id));
+  for (const t of pending) boardSummaries.set(t.id, 'loading');
+  renderAdmin();
+  await Promise.all(pending.map(async (t) => {
+    try {
+      // The open team's board is already in memory and up to date.
+      const board = t.id === teamId ? state : await backend.fetchBoard(t.id);
+      boardSummaries.set(t.id, {
+        open: board.tasks.filter((task) => task.status !== DONE_COLUMN_ID).length,
+        total: board.tasks.length,
+        sprint: activeSprint(board)?.name ?? null,
+      });
+    } catch {
+      boardSummaries.set(t.id, 'error');
+    }
+  }));
+  if (adminDialog.open) renderAdmin();
+}
+
+function renderAdmin() {
+  if (!adminDialog.open && !boardSummaries.size) return;
+  const hosted = backend?.kind === 'cloud';
+  $('#admin-role').textContent = !hosted
+    ? 'Everyone using this copy of TaskFlow can manage teams.'
+    : identity?.isOwner
+      ? 'You’re an admin because you own this page.'
+      : 'You’re an admin because you have edit access to this page.';
+
+  const summaryCells = (t) => {
+    const s = boardSummaries.get(t.id);
+    if (!s || s === 'loading') return [h('td', { class: 'muted' }, '…'), h('td', { class: 'muted' }, '…')];
+    if (s === 'error') return [h('td', { class: 'muted' }, 'Unavailable'), h('td', { class: 'muted' }, '–')];
+    return [
+      h('td', {}, `${s.open}`, h('span', { class: 'muted' }, ` of ${s.total}`)),
+      h('td', {}, s.sprint ?? h('span', { class: 'muted' }, 'None')),
+    ];
+  };
+
+  const rows = allTeams.map((t) => {
+    const count = teamMembers(t).length;
+    const s = boardSummaries.get(t.id);
+    return h('tr', { class: t.id === teamId ? 'is-current' : '' },
+      h('td', {}, t.name || 'Untitled team'),
+      h('td', {}, membersEnabled()
+        ? (count ? `${count}` : h('span', { class: 'muted' }, 'None yet'))
+        : h('span', { class: 'muted' }, '–')),
+      ...summaryCells(t),
+      h('td', {},
+        h('div', { class: 'row-actions' },
+          t.id === teamId ? null : h('button', {
+            type: 'button', class: 'btn',
+            onclick: () => { adminDialog.close(); selectTeam(t.id); },
+          }, 'Open'),
+          membersEnabled() ? h('button', { type: 'button', class: 'btn', onclick: () => openMembersDialog(t) }, 'Members') : null,
+          h('button', { type: 'button', class: 'btn', onclick: () => renameTeamFlow(t) }, 'Rename'),
+          h('button', {
+            type: 'button', class: 'btn btn-danger',
+            onclick: () => deleteTeamFlow(t, typeof s === 'object' ? s.total : null),
+          }, 'Delete'))));
+  });
+  setChildren($('#admin-teams'), rows.length ? rows
+    : h('tr', {}, h('td', { colspan: 5, class: 'muted' }, 'No teams yet. Create one to get started.')));
+
+  const role = (title, text) => h('li', {}, h('strong', {}, title), h('span', {}, text));
+  $('#admin-roles').replaceChildren(...(hosted ? [
+    role('Admins', 'The page owner and anyone given “Can edit” in this page’s Share menu. They see every team, create, rename and delete teams, and choose each team’s members.'),
+    role('Team members', 'People given “Can interact”. They see only the teams they’re a member of, and add, move and assign tasks there.'),
+    role('Viewers', 'People given “Can view” can look but not change anything.'),
+    role('Make someone an admin', 'Open this page’s Share menu and give them “Can edit”. Their admin options appear the next time they open the page.'),
+  ] : [
+    role('Everyone', 'This copy keeps teams in this browser, so anyone using it can manage teams and tasks.'),
+  ]));
+}
+
+$('#admin-btn').addEventListener('click', openAdmin);
+$('#admin-new-team').addEventListener('click', async () => {
+  await promptNewTeam();
+  if (adminDialog.open) loadBoardSummaries();
+});
+adminDialog.addEventListener('click', (e) => {
+  if (e.target === adminDialog || e.target.closest('[data-close]')) adminDialog.close();
+});
 
 // Faces of the current team's members, beside the tabs.
 function renderMembersStrip() {
@@ -324,6 +430,9 @@ let membersTeam = null;
 let draftMembers = [];
 let memberResults = [];
 let activeMember = 0;
+// The search box gets focus when the dialog opens; suggestions wait until
+// the person clicks or types, so they don't cover the dialog's controls.
+let quietMemberFocus = false;
 
 function openMembersDialog(team) {
   membersTeam = team;
@@ -334,7 +443,9 @@ function openMembersDialog(team) {
   renderMemberList();
   renderMemberResults();
   membersDialog.showModal();
+  quietMemberFocus = true;
   $('#member-input').focus();
+  quietMemberFocus = false;
   if (draftMembers.length) {
     userApi.profiles(draftMembers).then((profiles) => {
       for (const [id, p] of Object.entries(profiles)) people.set(id, { name: p.name, avatarUrl: p.avatarUrl, color: p.color });
@@ -402,7 +513,8 @@ function addMember(id) {
   renderMemberList();
 }
 
-$('#member-input').addEventListener('focus', updateMemberResults);
+$('#member-input').addEventListener('focus', () => { if (!quietMemberFocus) updateMemberResults(); });
+$('#member-input').addEventListener('click', () => { if (!memberResults.length) updateMemberResults(); });
 $('#member-input').addEventListener('input', updateMemberResults);
 $('#member-input').addEventListener('blur', () => setTimeout(renderMemberResults));
 $('#member-input').addEventListener('keydown', (e) => {
@@ -2060,6 +2172,13 @@ function renderAccount() {
   $('#account-btn').title = identity.name;
   $('#account-menu-name').textContent = identity.name;
   $('#account-menu-detail').textContent = identity.detail;
+  $('#admin-badge').hidden = !canManageTeams;
+  $('#admin-btn').hidden = !canManageTeams;
+  $('#account-note').textContent = backend?.kind !== 'cloud'
+    ? 'Teams and tasks are saved in this browser.'
+    : canManageTeams
+      ? 'As an admin you see every team.'
+      : 'You see the teams you’re a member of.';
   $('#sign-out-btn').hidden = !identity.canSignOut;
 }
 
@@ -2144,6 +2263,7 @@ async function boot() {
         detail: 'Signed in with your Claude account',
         avatarUrl: me.avatarUrl,
         color: me.color,
+        isOwner: Boolean(me.isOwner),
         canSignOut: false,
       };
     }
