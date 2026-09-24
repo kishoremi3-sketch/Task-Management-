@@ -569,6 +569,43 @@ export function daysLeft(sprint, today = todayISO()) {
   return Math.round((toDate(sprint.endDate) - toDate(today)) / 86400000) + 1;
 }
 
+// ---------- calendar ----------
+
+// The weeks shown for a month: full weeks starting on `firstDay`
+// (0 = Sunday ... 6 = Saturday), covering every day of the month.
+// Returns [[isoDate x7], ...] (5 or 6 weeks, sometimes 4 in February).
+export function monthGrid(year, month, firstDay = 1) {
+  const first = new Date(year, month, 1);
+  const offset = (first.getDay() - firstDay + 7) % 7;
+  const last = new Date(year, month + 1, 0).getDate();
+  const cells = Math.ceil((offset + last) / 7) * 7;
+  const weeks = [];
+  for (let i = 0; i < cells; i++) {
+    if (i % 7 === 0) weeks.push([]);
+    weeks[weeks.length - 1].push(todayISO(new Date(year, month, 1 - offset + i)));
+  }
+  return weeks;
+}
+
+const PRIORITY_RANK = { urgent: 0, high: 1, medium: 2, low: 3 };
+
+// Tasks with a due date grouped by that date; each day lists open tasks
+// first, then by priority, then by title.
+export function tasksByDueDate(tasks) {
+  const days = new Map();
+  for (const t of tasks) {
+    if (!t.dueDate) continue;
+    if (!days.has(t.dueDate)) days.set(t.dueDate, []);
+    days.get(t.dueDate).push(t);
+  }
+  for (const list of days.values()) {
+    list.sort((a, b) => (a.status === DONE_COLUMN_ID) - (b.status === DONE_COLUMN_ID)
+      || PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority]
+      || a.title.localeCompare(b.title));
+  }
+  return days;
+}
+
 export function addTask(state, fields) {
   const status = state.columns.some((c) => c.id === fields.status) ? fields.status : state.columns[0].id;
   const now = new Date().toISOString();

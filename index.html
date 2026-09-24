@@ -120,6 +120,10 @@
     <section class="stats" id="stats" aria-label="Board summary"></section>
 
     <section class="toolbar" aria-label="Filters">
+      <div class="layout-switch" id="layout-switch" role="group" aria-label="Show tasks as">
+        <button type="button" data-layout="board" aria-pressed="true">Board</button>
+        <button type="button" data-layout="calendar" aria-pressed="false">Calendar</button>
+      </div>
       <div class="search">
         <input type="search" id="search" placeholder="Search tasks…  ( / )" aria-label="Search tasks">
       </div>
@@ -158,6 +162,7 @@
     </section>
 
     <section class="board" id="board" aria-label="Kanban board"></section>
+    <section class="calendar" id="calendar" aria-label="Calendar" hidden></section>
     </div>
   </main>
 

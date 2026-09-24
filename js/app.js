@@ -5,7 +5,7 @@ import {
   assigneeKey, allAssigneeKeys, workload,
   sprintsOf, getSprint, activeSprint, nextSprintDefaults, addSprint, updateSprint, startSprint,
   completeSprint, deleteSprint, setSprintTasks, tasksInView, daysLeft, recordBurndown, burndownSeries,
-  sprintLoad, velocity,
+  sprintLoad, velocity, monthGrid, tasksByDueDate,
   addTask, updateTask, deleteTask, moveTask, addColumn, updateColumn, deleteColumn, isOverWip,
   todayISO,
 } from './store.js';
@@ -1247,6 +1247,232 @@ new ResizeObserver(() => requestAnimationFrame(() => {
   if (burndownPoints && !burndownHidden) drawBurndown();
 })).observe($('#burndown-chart'));
 
+// ---------- calendar ----------
+
+const calendarEl = $('#calendar');
+let layout = (() => {
+  try { return localStorage.getItem('taskflow.layout') === 'calendar' ? 'calendar' : 'board'; } catch { return 'board'; }
+})();
+let calendarMonth = (() => {
+  const now = new Date();
+  return { year: now.getFullYear(), month: now.getMonth() };
+})();
+
+// First day of the week from the browser's region (0 = Sunday), else Monday.
+const WEEK_START = (() => {
+  try {
+    const locale = new Intl.Locale(navigator.language || 'en-US');
+    const info = locale.getWeekInfo?.() ?? locale.weekInfo;
+    if (info?.firstDay) return info.firstDay % 7;
+  } catch { /* older browsers */ }
+  return 1;
+})();
+
+const MAX_CHIPS = 3;
+
+function setLayout(next) {
+  layout = next;
+  try { localStorage.setItem('taskflow.layout', next); } catch { /* ignore */ }
+  render();
+}
+
+for (const button of document.querySelectorAll('#layout-switch button')) {
+  button.addEventListener('click', () => setLayout(button.dataset.layout));
+}
+
+function calendarTasks() {
+  const ctx = peopleContext();
+  return viewState().tasks.filter((t) => matchesFilter(t, filter, undefined, ctx));
+}
+
+function moveCalendarMonth(delta) {
+  const d = new Date(calendarMonth.year, calendarMonth.month + delta, 1);
+  calendarMonth = { year: d.getFullYear(), month: d.getMonth() };
+  renderCalendar();
+}
+
+function rescheduleTask(id, dueDate) {
+  const task = getTask(state, id);
+  if (!task || task.dueDate === dueDate) return;
+  const before = state;
+  commit(updateTask(state, id, { dueDate }));
+  toast(dueDate ? `“${task.title}” is now due ${formatDay(dueDate)}` : `Removed the due date from “${task.title}”`,
+    { label: 'Undo', run: () => commit(before) });
+}
+
+function calendarChip(task, today) {
+  const done = task.status === DONE_COLUMN_ID;
+  const late = isOverdue(task, today);
+  const key = assigneeKey(task);
+  const person = key ? personFor(key) : null;
+  // A focusable div rather than a <button>: Firefox won't drag buttons.
+  const chip = h('div', {
+    role: 'button',
+    tabindex: 0,
+    class: `cal-chip priority-${task.priority}${done ? ' is-done' : ''}${late ? ' is-late' : ''}`,
+    draggable: 'true',
+    dataset: { id: task.id },
+    onkeydown: (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        chip.click();
+      }
+    },
+    title: [task.title, TASK_TYPE_LABELS[task.type], person ? `Assigned to ${person.name}` : 'Unassigned', late ? 'Overdue' : '']
+      .filter(Boolean).join(' · '),
+    onclick: () => openTaskDialog(task.id),
+    ondragstart: (e) => {
+      e.dataTransfer.setData('text/x-taskflow-task', task.id);
+      e.dataTransfer.effectAllowed = 'move';
+      calendarEl.classList.add('is-dragging');
+    },
+    ondragend: () => {
+      calendarEl.classList.remove('is-dragging');
+      calendarEl.querySelectorAll('.is-drop').forEach((el) => el.classList.remove('is-drop'));
+    },
+  },
+  task.type ? h('i', { class: `cal-type type-${task.type}`, 'aria-hidden': 'true' }) : null,
+  h('span', { class: 'cal-title' }, task.title),
+  person ? avatarEl(person, 'avatar tiny') : null);
+  return chip;
+}
+
+// Lets tasks be dropped onto a day (or onto "No due date" with day = '').
+function makeDropTarget(el, day) {
+  el.addEventListener('dragover', (e) => {
+    if (!e.dataTransfer.types.includes('text/x-taskflow-task')) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    el.classList.add('is-drop');
+  });
+  el.addEventListener('dragleave', (e) => {
+    if (!el.contains(e.relatedTarget)) el.classList.remove('is-drop');
+  });
+  el.addEventListener('drop', (e) => {
+    e.preventDefault();
+    el.classList.remove('is-drop');
+    const id = e.dataTransfer.getData('text/x-taskflow-task');
+    if (id) rescheduleTask(id, day);
+  });
+}
+
+function renderCalendar() {
+  const { year, month } = calendarMonth;
+  const today = todayISO();
+  const tasks = calendarTasks();
+  const byDay = tasksByDueDate(tasks);
+  const unscheduled = tasks.filter((t) => !t.dueDate)
+    .sort((a, b) => (a.status === DONE_COLUMN_ID) - (b.status === DONE_COLUMN_ID) || a.title.localeCompare(b.title));
+  const weeks = monthGrid(year, month, WEEK_START);
+  const monthKey = `${year}-${String(month + 1).padStart(2, '0')}`;
+  const sprint = getSprint(state, currentView()) ?? activeSprint(state);
+  const inSprint = (day) => sprint?.startDate && day >= sprint.startDate && day <= sprint.endDate;
+  const monthLabel = new Date(year, month, 1).toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+  const weekdayNames = weeks[0].map((day) => {
+    const [y, m, d] = day.split('-').map(Number);
+    return new Date(y, m - 1, d).toLocaleDateString(undefined, { weekday: 'short' });
+  });
+  const dueThisMonth = tasks.filter((t) => t.dueDate?.startsWith(monthKey));
+
+  const dayCell = (day) => {
+    const list = byDay.get(day) ?? [];
+    const [, m, d] = day.split('-').map(Number);
+    const outside = m - 1 !== month;
+    const sprintEdge = sprint && (day === sprint.startDate ? `${sprint.name} starts` : day === sprint.endDate ? `${sprint.name} ends` : '');
+    const cell = h('div', {
+      class: `cal-day${outside ? ' is-outside' : ''}${day === today ? ' is-today' : ''}${inSprint(day) ? ' in-sprint' : ''}`,
+      role: 'gridcell',
+      'aria-label': `${formatDay(day)}${list.length ? `, ${list.length} task${list.length === 1 ? '' : 's'} due` : ''}`,
+      dataset: { day },
+    },
+    h('div', { class: 'cal-day-head' },
+      h('span', { class: 'cal-date' }, d),
+      sprintEdge ? h('span', { class: 'cal-sprint', title: sprintEdge }, sprintEdge) : null,
+      h('button', {
+        type: 'button',
+        class: 'cal-add',
+        'aria-label': `New task due ${formatDay(day)}`,
+        title: 'New task due this day',
+        onclick: () => openTaskDialog(null, null, { dueDate: day }),
+      }, '+')),
+    list.slice(0, MAX_CHIPS).map((t) => calendarChip(t, today)),
+    list.length > MAX_CHIPS ? h('button', {
+      type: 'button',
+      class: 'cal-more',
+      onclick: (e) => {
+        e.stopPropagation(); // the page closes popups on outside clicks
+        openDayList(day, list, e.currentTarget);
+      },
+    }, `+${list.length - MAX_CHIPS} more`) : null);
+    makeDropTarget(cell, day);
+    return cell;
+  };
+
+  // Phones get an agenda: every day of the month that has tasks due.
+  const agendaDays = [...byDay.keys()].filter((day) => day.startsWith(monthKey)).sort();
+  const agenda = h('div', { class: 'cal-agenda' },
+    agendaDays.length
+      ? agendaDays.map((day) => h('section', { class: `cal-agenda-day${day === today ? ' is-today' : ''}` },
+        h('h4', {}, new Date(`${day}T00:00:00`).toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' }),
+          day === today ? h('span', { class: 'cal-today-tag' }, 'Today') : null),
+        h('div', { class: 'cal-agenda-list' }, byDay.get(day).map((t) => calendarChip(t, today)))))
+      : h('p', { class: 'cal-empty' }, 'Nothing is due this month.'));
+
+  const unscheduledList = h('div', { class: 'cal-unscheduled-list' },
+    unscheduled.length
+      ? unscheduled.map((t) => calendarChip(t, today))
+      : h('p', { class: 'cal-empty' }, 'Every task has a due date.'));
+  const side = h('aside', { class: 'cal-side', 'aria-labelledby': 'cal-side-title' },
+    h('h4', { id: 'cal-side-title' }, 'No due date ', h('span', { class: 'count' }, unscheduled.length)),
+    h('p', { class: 'cal-hint' }, 'Drag a task onto a day to schedule it.'),
+    unscheduledList);
+  makeDropTarget(side, '');
+
+  calendarEl.replaceChildren(
+    h('div', { class: 'cal-head' },
+      h('div', { class: 'cal-nav' },
+        h('button', { type: 'button', class: 'btn icon-btn', 'aria-label': 'Previous month', onclick: () => moveCalendarMonth(-1) }, '‹'),
+        h('button', {
+          type: 'button',
+          class: 'btn',
+          onclick: () => {
+            const now = new Date();
+            calendarMonth = { year: now.getFullYear(), month: now.getMonth() };
+            renderCalendar();
+          },
+        }, 'Today'),
+        h('button', { type: 'button', class: 'btn icon-btn', 'aria-label': 'Next month', onclick: () => moveCalendarMonth(1) }, '›'),
+        h('h3', { class: 'cal-month', 'aria-live': 'polite' }, monthLabel)),
+      h('p', { class: 'cal-summary' },
+        `${dueThisMonth.length} due this month`,
+        sprint ? ` · shaded: ${sprint.name}` : '')),
+    h('div', { class: 'cal-body' },
+      h('div', { class: 'cal-grid', role: 'grid', 'aria-label': monthLabel },
+        h('div', { class: 'cal-weekdays', role: 'row' }, weekdayNames.map((n) => h('div', { role: 'columnheader' }, n))),
+        weeks.map((week) => h('div', { class: 'cal-week', role: 'row' }, week.map(dayCell)))),
+      agenda,
+      side));
+}
+
+// All tasks due on a day, for days with more than fit in the cell.
+function openDayList(day, list, anchor) {
+  closePopups();
+  const today = todayISO();
+  const menu = h('div', { class: 'menu-list popup cal-day-popup', role: 'dialog', 'aria-label': `Tasks due ${formatDay(day)}` },
+    h('p', { class: 'cal-popup-title' }, new Date(`${day}T00:00:00`).toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })),
+    list.map((t) => {
+      const chip = calendarChip(t, today);
+      chip.addEventListener('click', () => closePopups());
+      return chip;
+    }));
+  document.body.append(menu);
+  // Position once the content is in, so the width is known.
+  const r = anchor.getBoundingClientRect();
+  menu.style.top = `${r.bottom + window.scrollY + 4}px`;
+  menu.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - menu.offsetWidth - 8)) + window.scrollX}px`;
+  menu.querySelector('.cal-chip')?.focus();
+}
+
 // ---------- rendering ----------
 
 function render() {
@@ -1259,7 +1485,12 @@ function render() {
   renderBurndown();
   renderStats();
   renderFilters();
-  renderBoard();
+  const calendar = layout === 'calendar';
+  boardEl.hidden = calendar;
+  calendarEl.hidden = !calendar;
+  for (const b of document.querySelectorAll('#layout-switch button')) b.setAttribute('aria-pressed', String(b.dataset.layout === layout));
+  if (calendar) renderCalendar();
+  else renderBoard();
   refreshPeople();
 }
 
@@ -1495,7 +1726,8 @@ function hue(text) {
 
 // ---------- task dialog ----------
 
-function openTaskDialog(id = null, columnId = null) {
+// preset: values for a new task, e.g. { dueDate } from the calendar.
+function openTaskDialog(id = null, columnId = null, preset = {}) {
   const task = id ? getTask(state, id) : null;
   editingId = task?.id ?? null;
   form.reset();
@@ -1514,7 +1746,7 @@ function openTaskDialog(id = null, columnId = null) {
   // Set each radio directly: assigning '' to the group's value doesn't
   // select the "None" option.
   for (const radio of form.type) radio.checked = radio.value === (task?.type ?? '');
-  form.dueDate.value = task?.dueDate ?? '';
+  form.dueDate.value = task?.dueDate ?? preset.dueDate ?? '';
   draftAssignee = task?.assigneeId ? { id: task.assigneeId } : task?.assignee ? { name: task.assignee } : null;
   $('#assignee-input').value = '';
   resultItems = [];

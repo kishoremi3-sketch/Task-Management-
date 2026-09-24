@@ -8,6 +8,7 @@ TaskFlow is a lightweight task manager. Its home screen is a Kanban board with a
 - **Kanban board**: Backlog → To Do → In Progress → Review → Done. You can add, rename, and delete columns, and set WIP limits (a column is highlighted when it goes over its limit).
 - **Drag & drop**: move cards within and across columns with a mouse, pen, or touch (long-press on mobile). The board auto-scrolls near the edges.
 - **Tasks**: title, description, status, priority (low/medium/high/urgent), type, story points, due date, assignee, and tags. There's a full edit dialog, plus quick-add at the bottom of every column.
+- **Calendar view**: switch between **Board** and **Calendar** above the filters (the choice is remembered). The calendar shows the month with each task on its due date, coloured by type and priority, with the assignee's avatar; overdue tasks are red and done tasks are struck through. The selected (or active) sprint's days are shaded, with its start and end marked. Drag a task to another day to reschedule it (with undo), drag one from the **No due date** list to schedule it, or drop it back there to clear its date. The **+** on a day adds a task due that day, and **+N more** lists busy days in full. Search, filters and the sprint picker apply here too. On phones the calendar becomes an agenda of the days that have tasks due.
 - **Search & filters**: free-text search plus filters for priority, assignee, tag, and due date (overdue / due soon / none).
 - **Undo** for deletes, clears, imports, and resets.
 - **Export / import** the board as JSON.

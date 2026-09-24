@@ -367,3 +367,31 @@ test('burndown carries points and estimates them for older snapshots', async () 
   assert.deepEqual(pts.map((p) => [p.remainingPoints, p.pointsEstimated]), [[8, true], [3, true], [3, false]]);
   assert.deepEqual(pts.map((p) => p.idealPoints), [8, 4, 0]);
 });
+
+test('monthGrid covers the month in whole weeks from the chosen first day', async () => {
+  const { monthGrid } = await import('../js/store.js');
+  const sep = monthGrid(2026, 8, 1); // September 2026 starts on a Tuesday
+  assert.equal(sep.length, 5);
+  assert.deepEqual(sep[0], ['2026-08-31', '2026-09-01', '2026-09-02', '2026-09-03', '2026-09-04', '2026-09-05', '2026-09-06']);
+  assert.equal(sep.at(-1).at(-1), '2026-10-04');
+  const sepSunday = monthGrid(2026, 8, 0);
+  assert.equal(sepSunday[0][0], '2026-08-30');
+  assert.equal(sepSunday[0][2], '2026-09-01');
+  assert.equal(monthGrid(2026, 1, 0).length, 4, 'Feb 2026 fits exactly in 4 Sunday-first weeks');
+  assert.equal(monthGrid(2026, 7, 1).length, 6, 'Aug 2026 needs 6 Monday-first weeks');
+  assert.ok(monthGrid(2026, 7, 1).flat().includes('2026-08-31'));
+});
+
+test('tasksByDueDate groups by day, open and urgent first', async () => {
+  const { tasksByDueDate } = await import('../js/store.js');
+  const s = board(
+    ['todo', 'b low', { dueDate: '2026-09-24', priority: 'low' }],
+    ['done', 'a done urgent', { dueDate: '2026-09-24', priority: 'urgent' }],
+    ['todo', 'c urgent', { dueDate: '2026-09-24', priority: 'urgent' }],
+    ['todo', 'no date'],
+    ['todo', 'other day', { dueDate: '2026-09-25' }],
+  );
+  const days = tasksByDueDate(s.tasks);
+  assert.deepEqual([...days.keys()].sort(), ['2026-09-24', '2026-09-25']);
+  assert.deepEqual(days.get('2026-09-24').map((t) => t.title), ['c urgent', 'b low', 'a done urgent']);
+});
