@@ -14,12 +14,13 @@ TaskFlow is a lightweight task manager. Its home screen is a Kanban board with a
 - **Light & dark themes**. The app follows your system setting until you toggle it.
 - **Cross-tab sync**: changes in one tab show up in the others.
 - **Teams**: create as many teams as you need. Each has its own shared board; switch between them with the tabs above the dashboard.
+- **Reports**: the **Reports** button (or **⋯ → Reports…**) opens a report builder. Pick a team (or all your teams), a sprint, the backlog or all tasks, filter by status and type, and choose sections: summary, sprint summary, task list, by person, by type and by status. The preview updates as you go, and **Export Excel** saves a multi-sheet `.xlsx` workbook while **Export PDF** saves a formatted landscape PDF. Excel files are generated in the browser with no library; PDFs use [jsPDF](https://github.com/parallax/jsPDF) and its table plugin, loaded from jsDelivr the first time you export one (so PDF export needs an internet connection).
 - **Admin settings**: admins see an "Admin" label and an **Admin settings** option in the account menu under their name. It lists every team with its members, open tasks and active sprint, with actions to open, manage members, rename or delete each team, create new teams, and a summary of who can do what. On claude.ai, admins are the page owner and anyone given "Can edit" in the Share menu; in a self-hosted copy, everyone is.
 - **Team members** (hosted on claude.ai): add people to each team. Each person only sees the tabs and tasks of their own teams; people who can edit the page see every team so they can manage them. This controls what the page shows, not who can read the data: anyone with access to the page could still read other teams' tasks with developer tools.
 - **Sprints**: each team plans its work in sprints. Pick a sprint in the sprint bar and the dashboard and board show only that sprint, with its dates, days left, goal and progress. **Plan sprint** pulls tasks in from the backlog (or out again), **Start sprint** makes it the active one, and **Complete sprint** keeps finished tasks as a record and moves unfinished ones to the next sprint or the backlog. You can also view **All tasks** or just the **Backlog**.
 - **Story points and sprint limits**: estimate tasks in story points (1, 2, 3, 5, 8, 13, 21). Each sprint can have a point limit; the sprint bar shows points planned against it, Plan sprint keeps a running total and asks before saving an over-limit plan, and adding points to a full sprint shows a warning. New sprints suggest the previous limit and show how many points recent sprints finished.
 - **Burndown charts**: every sprint shows a burndown of open story points (or tasks) per day against an ideal line, with an on-track / behind indicator, a hover or keyboard readout, and a table view. The board records a daily snapshot whenever it changes during the active sprint, so tasks added or removed mid-sprint show up; days from before tracking began are estimated from task completion dates and labelled as estimates.
-- **Task types**: mark a task as a **Project**, **Enhancement** or **Defect**. Each type has its own coloured label on the card, a filter, and open counts on the dashboard.
+- **Task types**: mark a task as a **Project**, **Enhancement**, **Defect** or **Service improvement item**. Each type has its own coloured label on the card, a filter, and open counts on the dashboard.
 - **Assignees**: assign tasks to people (hosted on claude.ai: search your organization by name; elsewhere: type a name). Every card shows who owns it, "Open tasks by person" shows each person's workload (click a person to filter), and there's an "Assigned to me" filter.
 - **Sign-in**: people sign in and their name and avatar appear in the top bar (see [Sign-in](#sign-in)).
 - **Cloud sync when hosted on claude.ai**: teams and boards are stored in the artifact's database and shared live with everyone who has access. Everywhere else they're kept in the browser.
@@ -81,6 +82,8 @@ css/styles.css      Styles (light/dark themes, responsive layout)
 js/store.js         Pure state logic: tasks, columns, filters, stats, persistence
 js/app.js           UI: rendering, drag & drop, dialogs, shortcuts, start-up
 js/auth.js          OpenID Connect sign-in (authorization code + PKCE)
+js/report.js        Builds report data (summary, task list, breakdowns) from boards
+js/xlsx.js          Dependency-free .xlsx writer used for Excel exports
 js/backend.js       Where teams and boards are stored: browser or shared database
 js/auth-config.js   SSO provider settings (empty = no sign-in)
 server.js           Zero-dependency static file server

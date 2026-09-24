@@ -23,12 +23,14 @@
     </div>
     <div class="topbar-actions">
       <span class="sync" id="sync-status" title="Where your board is saved">Saved in this browser</span>
+      <button class="btn btn-ghost reports-btn" id="reports-btn" title="Reports">Reports</button>
       <button class="btn btn-primary" id="new-task-btn" title="New task (N)">
         <span aria-hidden="true">+</span> New task
       </button>
       <div class="menu" id="board-menu">
         <button class="btn btn-ghost icon-btn" id="menu-btn" aria-haspopup="true" aria-expanded="false" aria-label="Board menu">⋯</button>
         <div class="menu-list" id="menu-list" role="menu" hidden>
+          <button role="menuitem" data-action="reports">Reports…</button>
           <button role="menuitem" data-action="add-column">Add column</button>
           <button role="menuitem" data-action="export">Export board (JSON)</button>
           <button role="menuitem" data-action="import">Import board…</button>
@@ -133,6 +135,7 @@
         <option value="project">Project</option>
         <option value="enhancement">Enhancement</option>
         <option value="defect">Defect</option>
+        <option value="service">Service improvement item</option>
         <option value="none">No type</option>
       </select>
       <select id="filter-assignee" aria-label="Filter by person"></select>
@@ -216,6 +219,7 @@
             <label class="type-project"><input type="radio" name="type" value="project"> Project</label>
             <label class="type-enhancement"><input type="radio" name="type" value="enhancement"> Enhancement</label>
             <label class="type-defect"><input type="radio" name="type" value="defect"> Defect</label>
+            <label class="type-service"><input type="radio" name="type" value="service"> Service improvement item</label>
           </div>
         </fieldset>
       </div>
@@ -321,6 +325,49 @@
         <button type="submit" class="btn btn-primary">Complete sprint</button>
       </footer>
     </form>
+  </dialog>
+
+  <dialog id="reports-dialog" class="reports-dialog" aria-labelledby="reports-title">
+    <div class="reports-body">
+      <header class="dialog-header">
+        <h2 id="reports-title">Reports</h2>
+        <button type="button" class="btn btn-ghost icon-btn" data-close aria-label="Close">✕</button>
+      </header>
+      <div class="report-controls">
+        <label class="field"><span>Team</span><select id="report-team"></select></label>
+        <label class="field"><span>Tasks from</span><select id="report-view"></select></label>
+        <label class="field">
+          <span>Status</span>
+          <select id="report-state">
+            <option value="all">All tasks</option>
+            <option value="open">Open tasks only</option>
+            <option value="done">Done tasks only</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Type</span>
+          <select id="report-type">
+            <option value="">All types</option>
+            <option value="project">Project</option>
+            <option value="enhancement">Enhancement</option>
+            <option value="defect">Defect</option>
+            <option value="service">Service improvement item</option>
+            <option value="none">No type</option>
+          </select>
+        </label>
+      </div>
+      <fieldset class="report-include">
+        <legend>Include</legend>
+        <div class="report-include-options" id="report-sections"></div>
+      </fieldset>
+      <div class="report-preview" id="report-preview" aria-live="polite"></div>
+      <footer class="dialog-footer report-footer">
+        <span class="report-note" id="report-note" role="status"></span>
+        <span class="spacer"></span>
+        <button type="button" class="btn" id="export-xlsx">Export Excel</button>
+        <button type="button" class="btn btn-primary" id="export-pdf">Export PDF</button>
+      </footer>
+    </div>
   </dialog>
 
   <dialog id="admin-dialog" class="admin-dialog" aria-labelledby="admin-title">

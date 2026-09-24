@@ -12,7 +12,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (p) => readFile(join(root, p), 'utf8');
 
 // Modules in dependency order; each is turned into plain script code.
-const modules = ['js/store.js', 'js/auth-config.js', 'js/auth.js', 'js/backend.js', 'js/app.js'];
+const modules = ['js/store.js', 'js/auth-config.js', 'js/auth.js', 'js/backend.js', 'js/xlsx.js', 'js/report.js', 'js/app.js'];
 const [html, css, ...sources] = await Promise.all([
   read('index.html'), read('css/styles.css'), ...modules.map(read),
 ]);

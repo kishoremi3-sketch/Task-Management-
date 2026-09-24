@@ -225,7 +225,10 @@ test('task types: validated, filterable, searchable and counted', () => {
   assert.deepEqual(titles({ type: 'defect' }), ['Crash on save', 'Old crash']);
   assert.deepEqual(titles({ type: 'none' }), ['Misc']);
   assert.deepEqual(titles({ query: 'enhancement' }), ['Dark mode']);
-  assert.deepEqual(getStats(s, today).byType, { project: 1, enhancement: 1, defect: 1 }, 'open tasks only');
+  assert.deepEqual(getStats(s, today).byType, { project: 1, enhancement: 1, defect: 1, service: 0 }, 'open tasks only');
+  s = addTask(s, { title: 'Faster ticket triage', status: 'todo', type: 'service' });
+  assert.deepEqual(titles({ type: 'service' }), ['Faster ticket triage']);
+  assert.deepEqual(titles({ query: 'service improvement' }), ['Faster ticket triage']);
   s = updateTask(s, byTitle('Misc').id, { type: 'project' });
   assert.equal(byTitle('Misc').type, 'project');
 });

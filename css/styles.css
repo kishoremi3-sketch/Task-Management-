@@ -21,6 +21,7 @@
   --t-project: #6d28d9;
   --t-enhancement: #0f766e;
   --t-defect: #be123c;
+  --t-service: #0369a1;
   --chart-remaining: #4f46e5;
   --chart-ideal: #646a7d;
   --a0: #64748b;
@@ -59,6 +60,7 @@
     --t-project: #c4b5fd;
     --t-enhancement: #5eead4;
     --t-defect: #fda4af;
+    --t-service: #7dd3fc;
     --chart-remaining: #7a7ef2;
     --chart-ideal: #6e7486;
     --tag-l: 22%;
@@ -90,6 +92,7 @@
   --t-project: #c4b5fd;
   --t-enhancement: #5eead4;
   --t-defect: #fda4af;
+  --t-service: #7dd3fc;
   --chart-remaining: #7a7ef2;
   --chart-ideal: #6e7486;
   --tag-l: 22%;
@@ -721,6 +724,44 @@ body:not([data-view="signin"]) .signin { display: none; }
 .member-faces .avatar + .avatar { margin-left: -6px; }
 .member-none { color: var(--muted); font-weight: 400; font-style: italic; }
 
+/* ---------- reports ---------- */
+
+.reports-dialog { width: min(980px, calc(100vw - 32px)); }
+.reports-body { display: flex; flex-direction: column; gap: 14px; padding: 18px 20px 20px; }
+.report-controls { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.report-include { margin: 0; padding: 0; border: none; }
+.report-include legend { padding: 0; margin-bottom: 6px; font-size: 12px; font-weight: 600; color: var(--muted); }
+.report-include-options { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+.report-include-options label { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; }
+.report-include-options input { margin: 0; accent-color: var(--primary); }
+.report-include-options input:disabled + span { color: var(--muted); }
+
+.report-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-height: min(460px, 50vh);
+  overflow: auto;
+  padding: 16px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.report-head h3 { margin: 0; font-size: 16px; }
+.report-head p { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
+.report-section h4 { margin: 0 0 6px; font-size: 13px; }
+.report-section .table-wrap { max-height: none; margin-top: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
+.report-section table { font-size: 12px; }
+.report-section .pairs td:first-child { font-weight: 600; color: var(--muted); width: 45%; }
+.report-section .pairs td { text-align: left; }
+.report-section th { background: var(--surface-2); }
+.report-more { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
+.report-empty { margin: 0; color: var(--muted); }
+.report-note { color: var(--muted); font-size: 13px; }
+.report-note.is-error { color: var(--danger); }
+.report-footer .btn:disabled { opacity: .6; cursor: progress; }
+
 /* ---------- admin ---------- */
 
 .admin-badge {
@@ -979,7 +1020,8 @@ body:not([data-view="signin"]) .signin { display: none; }
 .priority-high { --prio: var(--p-high); }
 .priority-urgent { --prio: var(--p-urgent); }
 
-.card-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.card-top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 8px; }
+.card-badges { flex-wrap: wrap; row-gap: 4px; }
 
 .badge {
   font-size: 11px;
@@ -1009,6 +1051,7 @@ body:not([data-view="signin"]) .signin { display: none; }
 .type-project { --type: var(--t-project); }
 .type-enhancement { --type: var(--t-enhancement); }
 .type-defect { --type: var(--t-defect); }
+.type-service { --type: var(--t-service); }
 
 .type-field { margin: 0; padding: 0; border: none; }
 .type-field legend { padding: 0; margin-bottom: 4px; font-size: 12px; font-weight: 600; color: var(--muted); }
@@ -1217,6 +1260,8 @@ dialog::backdrop { background: rgb(10 12 20 / 0.5); }
   #new-task-btn { padding: 7px 10px; }
   .sync { display: none; }
   .account-name { display: none; }
+  .reports-btn { display: none; }
+  .report-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .account-btn { padding: 3px; }
 }
 

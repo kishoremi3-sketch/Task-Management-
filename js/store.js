@@ -6,8 +6,15 @@ export const STORAGE_KEY = 'taskflow.board.v1';
 export const PRIORITIES = ['low', 'medium', 'high', 'urgent'];
 
 // A task's type; '' means no type.
-export const TASK_TYPES = ['project', 'enhancement', 'defect'];
-export const TASK_TYPE_LABELS = { project: 'Project', enhancement: 'Enhancement', defect: 'Defect' };
+export const TASK_TYPES = ['project', 'enhancement', 'defect', 'service'];
+export const TASK_TYPE_LABELS = {
+  project: 'Project',
+  enhancement: 'Enhancement',
+  defect: 'Defect',
+  service: 'Service improvement item',
+};
+// Shorter names for tight spots such as card labels.
+export const TASK_TYPE_SHORT = { ...TASK_TYPE_LABELS, service: 'Service improvement' };
 
 // Suggested story point values (a task can hold any value 0–999).
 export const POINT_SCALE = [1, 2, 3, 5, 8, 13, 21];

@@ -1,5 +1,5 @@
 import {
-  PRIORITIES, DONE_COLUMN_ID, TASK_TYPES, TASK_TYPE_LABELS, POINT_SCALE, cleanPoints, sumPoints,
+  PRIORITIES, DONE_COLUMN_ID, TASK_TYPES, TASK_TYPE_LABELS, TASK_TYPE_SHORT, POINT_SCALE, cleanPoints, sumPoints,
   createEmptyState, createSampleState, normalizeState, normalizeTags,
   tasksInColumn, getTask, isOverdue, isDueSoon, allTags, matchesFilter, getStats,
   assigneeKey, allAssigneeKeys, workload,
@@ -10,6 +10,8 @@ import {
   todayISO,
 } from './store.js';
 import { ssoProviders, signIn, signOut, handleRedirect, currentSession } from './auth.js';
+import { buildXlsx } from './xlsx.js';
+import { REPORT_SECTIONS, buildReport, reportToSheets, reportFileName } from './report.js';
 import {
   createLocalBackend, createCloudBackend, cleanTeamName, cleanMembers, visibleTeams,
 } from './backend.js';
@@ -881,7 +883,7 @@ function openPlanDialog(sprint) {
     return h('li', { dataset: { search: `${task.title} ${task.tags.join(' ')} ${key ? personFor(key).name : ''}`.toLowerCase() } },
       h('label', { class: 'plan-row' },
         h('input', { type: 'checkbox', value: task.id, checked, onchange: updatePlanCount }),
-        task.type ? h('span', { class: `type-badge type-${task.type}` }, TASK_TYPE_LABELS[task.type]) : h('span'),
+        task.type ? h('span', { class: `type-badge type-${task.type}` }, TASK_TYPE_SHORT[task.type]) : h('span'),
         h('span', { class: 'plan-title' }, task.title),
         h('span', { class: 'plan-meta' }, [columnName(task.status), key ? shortName(personFor(key).name) : null].filter(Boolean).join(' · ')),
         h('span', { class: 'plan-points', title: task.points === null ? 'Not estimated' : pts(task.points) },
@@ -1439,7 +1441,7 @@ function renderCard(task) {
   },
   h('div', { class: 'card-top' },
     h('span', { class: 'card-badges' },
-      task.type ? h('span', { class: `type-badge type-${task.type}` }, TASK_TYPE_LABELS[task.type]) : null,
+      task.type ? h('span', { class: `type-badge type-${task.type}`, title: TASK_TYPE_LABELS[task.type] }, TASK_TYPE_SHORT[task.type]) : null,
       h('span', { class: `badge badge-${task.priority}` }, task.priority),
       task.points !== null ? h('span', { class: 'points-badge', title: `${pts(task.points)} (story points)` }, pts(task.points)) : null),
     task.dueDate ? h('span', {
@@ -1987,6 +1989,347 @@ function autoScroll() {
   requestAnimationFrame(autoScroll);
 }
 
+// ---------- saving files ----------
+
+// Offers a generated file to the person. Resolves true when saved, false
+// when they declined. Uses the host's download prompt when there is one
+// (claude.ai), otherwise a normal browser download.
+async function saveFile(filename, data, mime) {
+  const downloads = await claudeUse('downloads');
+  if (downloads) {
+    try {
+      await downloads.save({ filename, data });
+      return true;
+    } catch (err) {
+      if (err?.code === 'declined') return false;
+      throw err;
+    }
+  }
+  const blob = new Blob([data], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const link = h('a', { href: url, download: filename });
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return true;
+}
+
+function loadScript(src) {
+  const existing = document.querySelector(`script[data-src="${CSS.escape(src)}"]`);
+  if (existing) return existing.loaded;
+  const script = document.createElement('script');
+  script.src = src;
+  script.dataset.src = src;
+  script.loaded = new Promise((resolve, reject) => {
+    script.onload = resolve;
+    script.onerror = () => {
+      script.remove();
+      reject(new Error('The PDF tools couldn’t be downloaded. Check your internet connection and try again.'));
+    };
+  });
+  document.head.append(script);
+  return script.loaded;
+}
+
+// ---------- reports ----------
+
+const reportsDialog = $('#reports-dialog');
+const report = {
+  team: null, // a team id, or 'all'
+  view: 'all',
+  include: new Set(REPORT_SECTIONS.map((s) => s.id)),
+  boards: new Map(), // team id -> board, for this opening of the dialog
+  data: null, // the last report built
+  token: 0,
+};
+
+function openReports() {
+  closePopups();
+  report.boards.clear();
+  report.team = teamId ?? teams[0]?.id ?? null;
+  report.view = currentView();
+  $('#report-state').value = 'all';
+  $('#report-type').value = '';
+  const teamOptions = teams.map((t) => h('option', { value: t.id }, t.name || 'Untitled team'));
+  if (teams.length > 1) {
+    teamOptions.push(h('option', { value: 'all' }, canManageTeams ? 'All teams' : 'All my teams'));
+  }
+  $('#report-team').replaceChildren(...teamOptions);
+  $('#report-team').value = report.team ?? '';
+  $('#report-sections').replaceChildren(...REPORT_SECTIONS.map((s) => h('label', {},
+    h('input', {
+      type: 'checkbox',
+      value: s.id,
+      checked: report.include.has(s.id),
+      onchange: (e) => {
+        if (e.target.checked) report.include.add(s.id);
+        else report.include.delete(s.id);
+        refreshReport();
+      },
+    }),
+    h('span', {}, s.label))));
+  reportsDialog.showModal();
+  refreshReport();
+}
+
+async function loadReportBoards(ids) {
+  await Promise.all(ids.map(async (id) => {
+    if (id === teamId) report.boards.set(id, state); // already current
+    else if (!report.boards.has(id)) report.boards.set(id, await backend.fetchBoard(id));
+  }));
+  return ids.map((id) => report.boards.get(id));
+}
+
+function setReportNote(text, isError = false) {
+  const note = $('#report-note');
+  note.textContent = text;
+  note.classList.toggle('is-error', isError);
+}
+
+async function refreshReport() {
+  const token = ++report.token;
+  const ids = report.team === 'all' ? teams.map((t) => t.id) : [report.team].filter(Boolean);
+  $('#export-xlsx').disabled = true;
+  $('#export-pdf').disabled = true;
+  if (!ids.length) {
+    $('#report-preview').replaceChildren(h('p', { class: 'report-empty' }, 'There are no teams to report on yet.'));
+    setReportNote('');
+    return;
+  }
+  setReportNote('Loading…');
+  let boards;
+  try {
+    boards = await loadReportBoards(ids);
+    // Names for everyone assigned on these boards.
+    const accountIds = [...new Set(boards.flatMap((b) => b.tasks.map((t) => t.assigneeId)).filter(Boolean))];
+    if (userApi && accountIds.length) {
+      const profiles = await userApi.profiles(accountIds);
+      for (const [id, p] of Object.entries(profiles)) people.set(id, { name: p.name, avatarUrl: p.avatarUrl, color: p.color });
+    }
+  } catch (err) {
+    if (token === report.token) setReportNote(`Couldn’t load the boards: ${err?.message ?? 'unknown error'}`, true);
+    return;
+  }
+  if (token !== report.token) return;
+
+  // "Tasks from" lists the chosen team's sprints; a multi-team report
+  // always covers all tasks.
+  const viewSelect = $('#report-view');
+  if (ids.length > 1) {
+    viewSelect.replaceChildren(h('option', { value: 'all' }, 'All tasks'));
+    viewSelect.disabled = true;
+    report.view = 'all';
+  } else {
+    const board = boards[0];
+    const sprints = sprintsOf(board);
+    if (report.view !== 'all' && report.view !== 'backlog' && !getSprint(board, report.view)) report.view = 'all';
+    viewSelect.replaceChildren(
+      h('option', { value: 'all' }, 'All tasks'),
+      h('option', { value: 'backlog' }, 'Backlog (not in a sprint)'),
+      ...sprints.map((sp) => h('option', { value: sp.id }, `${sp.name}${sp.status === 'active' ? ' (active)' : sp.status === 'completed' ? ' (completed)' : ''}`)),
+    );
+    viewSelect.disabled = false;
+    viewSelect.value = report.view;
+  }
+  const sprintChosen = ids.length === 1 && getSprint(boards[0], report.view);
+  const sprintBox = $('#report-sections').querySelector('input[value="sprint"]');
+  sprintBox.disabled = !sprintChosen;
+  sprintBox.parentElement.title = sprintChosen ? '' : 'Choose a sprint under “Tasks from” to include its summary';
+
+  const teamName = (id) => teams.find((t) => t.id === id)?.name ?? 'Team';
+  report.data = buildReport({
+    entries: ids.map((id, i) => ({ teamName: teamName(id), board: boards[i] })),
+    view: report.view,
+    filters: { status: $('#report-state').value, type: $('#report-type').value },
+    include: [...report.include],
+    nameOf: (t) => {
+      const key = assigneeKey(t);
+      return key ? personFor(key).name : '';
+    },
+  });
+  renderReportPreview(report.data);
+  const hasContent = report.data.sections.length > 0;
+  $('#export-xlsx').disabled = !hasContent;
+  $('#export-pdf').disabled = !hasContent;
+  setReportNote(hasContent
+    ? `${report.data.taskCount} task${report.data.taskCount === 1 ? '' : 's'} in this report`
+    : 'Choose at least one section to include.');
+}
+
+const PREVIEW_ROWS = 25;
+
+function renderReportPreview(r) {
+  const tableFor = (section) => {
+    if (section.kind === 'pairs') {
+      return h('table', { class: 'pairs' }, h('tbody', {}, section.rows.map(([k, v]) => h('tr', {}, h('td', {}, k), h('td', {}, v)))));
+    }
+    return h('table', {},
+      h('thead', {}, h('tr', {}, section.columns.map((c) => h('th', {}, c)))),
+      h('tbody', {}, section.rows.slice(0, PREVIEW_ROWS).map((row) => h('tr', {}, row.map((v) => h('td', {}, v === '' ? '–' : v))))));
+  };
+  setChildren($('#report-preview'),
+    h('div', { class: 'report-head' },
+      h('h3', {}, r.title),
+      h('p', {}, `${r.scope} · Generated ${formatDay(r.generatedOn)}`)),
+    r.sections.map((section) => h('section', { class: 'report-section' },
+      h('h4', {}, section.title),
+      section.kind === 'table' && !section.rows.length
+        ? h('p', { class: 'report-empty' }, 'Nothing to show for this selection.')
+        : h('div', { class: 'table-wrap' }, tableFor(section)),
+      section.kind === 'table' && section.rows.length > PREVIEW_ROWS
+        ? h('p', { class: 'report-more' }, `Showing ${PREVIEW_ROWS} of ${section.rows.length} rows. Exports include all of them.`)
+        : null)),
+    r.sections.length ? null : h('p', { class: 'report-empty' }, 'Choose at least one section to include.'));
+}
+
+$('#report-team').addEventListener('change', (e) => {
+  report.team = e.target.value;
+  report.view = 'all';
+  refreshReport();
+});
+$('#report-view').addEventListener('change', (e) => {
+  report.view = e.target.value;
+  refreshReport();
+});
+$('#report-state').addEventListener('change', refreshReport);
+$('#report-type').addEventListener('change', refreshReport);
+reportsDialog.addEventListener('click', (e) => {
+  if (e.target === reportsDialog || e.target.closest('[data-close]')) reportsDialog.close();
+});
+
+async function runExport(button, work) {
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = 'Preparing…';
+  try {
+    const saved = await work();
+    if (saved) toast('Report exported');
+  } catch (err) {
+    setReportNote(err?.message ?? 'The export failed.', true);
+  } finally {
+    button.disabled = false;
+    button.textContent = label;
+  }
+}
+
+$('#export-xlsx').addEventListener('click', (e) => runExport(e.currentTarget, () => saveFile(
+  reportFileName(report.data, 'xlsx'),
+  buildXlsx(reportToSheets(report.data)),
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+)));
+
+$('#export-pdf').addEventListener('click', (e) => runExport(e.currentTarget, async () => {
+  const jsPDF = await loadPdfLibrary();
+  return saveFile(reportFileName(report.data, 'pdf'), reportToPdf(jsPDF, report.data), 'application/pdf');
+}));
+
+// jsPDF and its table plugin load from a CDN the first time a PDF is made.
+const PDF_LIBRARIES = [
+  'https://cdn.jsdelivr.net/npm/jspdf@4.2.1/dist/jspdf.umd.min.js',
+  'https://cdn.jsdelivr.net/npm/jspdf-autotable@5.0.8/dist/jspdf.plugin.autotable.min.js',
+];
+
+async function loadPdfLibrary() {
+  for (const src of PDF_LIBRARIES) await loadScript(src);
+  const jsPDF = window.jspdf?.jsPDF;
+  if (!jsPDF?.API?.autoTable) throw new Error('The PDF tools didn’t load correctly. Please try again.');
+  return jsPDF;
+}
+
+// The PDF's built-in fonts cover Western European characters; swap common
+// typographic ones for plain equivalents and anything else for "?".
+function pdfText(value) {
+  return String(value ?? '')
+    .replace(/[‘’‚′]/g, '\'')
+    .replace(/[“”„″]/g, '"')
+    .replace(/[–—−]/g, '-')
+    .replace(/…/g, '...')
+    .replace(/[^\u0000-ÿ]/g, '?'); // eslint-disable-line no-control-regex
+}
+
+function reportToPdf(jsPDF, r) {
+  const doc = new jsPDF({ orientation: 'landscape', unit: 'pt', format: 'a4' });
+  const margin = 40;
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const ink = [28, 31, 42];
+  const muted = [100, 106, 125];
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(18);
+  doc.setTextColor(...ink);
+  doc.text(pdfText(r.title), margin, 52);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(10);
+  doc.setTextColor(...muted);
+  doc.text(pdfText(`${r.scope}  ·  Generated ${r.generatedOn}  ·  ${r.taskCount} tasks`), margin, 70);
+
+  let y = 96;
+  for (const section of r.sections) {
+    if (y > pageHeight - 100) {
+      doc.addPage();
+      y = 52;
+    }
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(12);
+    doc.setTextColor(...ink);
+    doc.text(pdfText(section.title), margin, y);
+    const common = {
+      startY: y + 8,
+      margin: { left: margin, right: margin, bottom: 40 },
+      theme: 'grid',
+      styles: { font: 'helvetica', fontSize: 8, cellPadding: 4, overflow: 'linebreak', textColor: ink, lineColor: [217, 220, 230], lineWidth: 0.5 },
+      headStyles: { fillColor: [79, 70, 229], textColor: 255, fontStyle: 'bold' },
+      alternateRowStyles: { fillColor: [246, 247, 251] },
+    };
+    if (section.kind === 'pairs') {
+      doc.autoTable({
+        ...common,
+        body: section.rows.map(([k, v]) => [pdfText(k), pdfText(v)]),
+        tableWidth: 420,
+        columnStyles: { 0: { fontStyle: 'bold', cellWidth: 190, textColor: muted } },
+      });
+    } else if (!section.rows.length) {
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(9);
+      doc.setTextColor(...muted);
+      doc.text('Nothing to show for this selection.', margin, y + 20);
+      y += 44;
+      continue;
+    } else {
+      // Right-align columns that hold only numbers; keep the task name
+      // readable and let other columns size to their content.
+      const columnStyles = {};
+      section.columns.forEach((_, i) => {
+        const values = section.rows.map((row) => row[i]).filter((v) => v !== '' && v !== null && v !== undefined);
+        if (values.length && values.every((v) => typeof v === 'number')) columnStyles[i] = { halign: 'right' };
+      });
+      if (section.id === 'tasks') columnStyles[section.columns.indexOf('Task')] = { cellWidth: 150 };
+      doc.autoTable({
+        ...common,
+        head: [section.columns.map(pdfText)],
+        body: section.rows.map((row) => row.map(pdfText)),
+        columnStyles,
+      });
+    }
+    y = doc.lastAutoTable.finalY + 28;
+  }
+
+  const pages = doc.getNumberOfPages();
+  for (let i = 1; i <= pages; i++) {
+    doc.setPage(i);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8);
+    doc.setTextColor(...muted);
+    doc.text(pdfText(`TaskFlow  ·  ${r.scope}`), margin, pageHeight - 20);
+    doc.text(`Page ${i} of ${pages}`, pageWidth - margin, pageHeight - 20, { align: 'right' });
+  }
+  return doc.output('arraybuffer');
+}
+
+$('#reports-btn').addEventListener('click', openReports);
+
 // ---------- toolbar & menu ----------
 
 $('#new-task-btn').addEventListener('click', () => openTaskDialog());
@@ -2030,26 +2373,14 @@ $('#menu-list').addEventListener('click', (e) => {
 
 const menuActions = {
   'add-column': promptAddColumn,
+  reports: () => openReports(),
   async export() {
-    const json = JSON.stringify(state, null, 2);
-    const filename = `taskflow-board-${todayISO()}.json`;
-    const downloads = await claudeUse('downloads');
-    if (downloads) {
-      try {
-        await downloads.save({ filename, data: json });
-        toast('Board exported');
-      } catch (err) {
-        if (err?.code !== 'declined') toast(`Export failed: ${err?.message ?? 'unknown error'}`);
-      }
-      return;
+    try {
+      const saved = await saveFile(`taskflow-board-${todayISO()}.json`, JSON.stringify(state, null, 2), 'application/json');
+      if (saved) toast('Board exported');
+    } catch (err) {
+      toast(`Export failed: ${err?.message ?? 'unknown error'}`);
     }
-    const blob = new Blob([json], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const link = h('a', { href: url, download: filename });
-    document.body.append(link);
-    link.click();
-    link.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
   },
   import() {
     $('#import-input').click();
