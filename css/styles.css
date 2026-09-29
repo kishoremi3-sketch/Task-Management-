@@ -22,6 +22,8 @@
   --t-enhancement: #0f766e;
   --t-defect: #be123c;
   --t-service: #0369a1;
+  /* Team tag colours */
+  --g0: #2563eb; --g1: #0f766e; --g2: #c2410c; --g3: #7c3aed; --g4: #be185d; --g5: #4d7c0f; --g6: #a16207; --g7: #0e7490;
   --chart-remaining: #4f46e5;
   --chart-ideal: #646a7d;
   --a0: #64748b;
@@ -61,6 +63,7 @@
     --t-enhancement: #5eead4;
     --t-defect: #fda4af;
     --t-service: #7dd3fc;
+    --g0: #93c5fd; --g1: #5eead4; --g2: #fdba74; --g3: #c4b5fd; --g4: #f9a8d4; --g5: #bef264; --g6: #fcd34d; --g7: #67e8f9;
     --chart-remaining: #7a7ef2;
     --chart-ideal: #6e7486;
     --tag-l: 22%;
@@ -93,6 +96,7 @@
   --t-enhancement: #5eead4;
   --t-defect: #fda4af;
   --t-service: #7dd3fc;
+  --g0: #93c5fd; --g1: #5eead4; --g2: #fdba74; --g3: #c4b5fd; --g4: #f9a8d4; --g5: #bef264; --g6: #fcd34d; --g7: #67e8f9;
   --chart-remaining: #7a7ef2;
   --chart-ideal: #6e7486;
   --tag-l: 22%;
@@ -1024,7 +1028,7 @@ body:not([data-view="signin"]) .signin { display: none; }
   margin-bottom: 16px;
 }
 
-.search { flex: 1 1 240px; }
+.search { flex: 1 1 180px; }
 
 .toolbar input, .toolbar select, .field input, .field select, .field textarea {
   width: 100%;
@@ -1034,7 +1038,9 @@ body:not([data-view="signin"]) .signin { display: none; }
   border-radius: 8px;
 }
 
-.toolbar select { width: auto; min-width: 140px; }
+.toolbar select { width: auto; min-width: 120px; max-width: 200px; }
+/* Checkboxes and radios inside fields keep their natural size. */
+.field input[type="checkbox"], .field input[type="radio"] { width: auto; padding: 0; flex: none; }
 
 /* ---------- board ---------- */
 
@@ -1368,6 +1374,147 @@ dialog::backdrop { background: rgb(10 12 20 / 0.5); }
   padding: 0;
 }
 
+/* ---------- team tags ---------- */
+
+.team-c0 { --g: var(--g0); } .team-c1 { --g: var(--g1); } .team-c2 { --g: var(--g2); } .team-c3 { --g: var(--g3); }
+.team-c4 { --g: var(--g4); } .team-c5 { --g: var(--g5); } .team-c6 { --g: var(--g6); } .team-c7 { --g: var(--g7); }
+
+.team-pill {
+  display: inline-block;
+  max-width: 100%;
+  padding: 1px 7px 1px 6px;
+  border: 1px solid color-mix(in srgb, var(--g) 40%, transparent);
+  border-left-width: 3px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--g) 10%, var(--surface));
+  color: var(--g);
+  font-size: 11px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.team-dot { width: 10px; height: 10px; border-radius: 3px; background: var(--g); justify-self: center; flex: none; }
+.team-dot.is-none { background: var(--surface-2); border: 1px dashed var(--muted); }
+
+.card-teams { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 8px; }
+
+.checklist-badge {
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.checklist-badge.is-complete { color: var(--success); }
+
+.avatar-stack { display: inline-flex; flex: none; }
+.avatar-stack .avatar { box-shadow: 0 0 0 2px var(--surface); }
+.avatar-stack .avatar + .avatar { margin-left: -7px; }
+
+.cal-extra { flex: none; color: var(--muted); font-size: 10px; font-weight: 700; }
+
+/* Several assignees in the task dialog */
+ul.assignee-chosen { flex-wrap: wrap; gap: 4px; margin: 0 0 6px; padding: 4px; list-style: none; min-height: 0; }
+ul.assignee-chosen[hidden] { display: none; }
+.assignee-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 2px 2px 2px 3px;
+  border-radius: 99px;
+  background: var(--surface-2);
+  font-size: 13px;
+}
+.assignee-chip .chip-clear { width: 20px; height: 20px; border-radius: 50%; }
+.lead-tag { color: var(--muted); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+
+.team-field, .checklist-field { margin: 0; padding: 0; border: none; min-width: 0; }
+.team-field legend, .checklist-field legend { padding: 0; margin-bottom: 4px; font-size: 12px; font-weight: 600; color: var(--muted); }
+.team-field legend small, .checklist-field legend small { font-weight: 400; }
+.team-options { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.team-options .link-btn { align-self: center; margin-left: 4px; }
+
+.team-option {
+  display: inline-flex;
+  white-space: nowrap;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.team-option input { margin: 0; accent-color: var(--g); }
+.team-option:has(input:checked) {
+  border-color: var(--g);
+  background: color-mix(in srgb, var(--g) 12%, var(--surface));
+  color: var(--g);
+}
+.team-option:has(input:focus-visible) { outline: 2px solid var(--primary); outline-offset: 2px; }
+
+.checklist { display: flex; flex-direction: column; gap: 4px; margin: 0 0 6px; padding: 0; list-style: none; }
+.checklist[hidden] { display: none; }
+.checklist-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) minmax(0, 140px) minmax(0, 110px) auto;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 4px 3px 8px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--g, var(--border));
+  border-radius: 8px;
+  background: var(--surface);
+}
+.checklist-item > input[type="checkbox"] { margin: 0; width: 16px; height: 16px; accent-color: var(--success); }
+.checklist-item .checklist-text {
+  min-width: 0;
+  padding: 4px 6px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: none;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+}
+.checklist-item .checklist-text:hover, .checklist-item .checklist-text:focus { border-color: var(--border); background: var(--surface); }
+.checklist-item.is-done .checklist-text { text-decoration: line-through; color: var(--muted); }
+.checklist-item select { min-width: 0; padding: 3px 6px; font-size: 12px; }
+.checklist-add { display: flex; gap: 6px; }
+.checklist-add input { flex: 1; min-width: 0; }
+
+.team-tags-dialog { width: min(480px, calc(100vw - 32px)); }
+.team-tags-body { display: flex; flex-direction: column; gap: 12px; padding: 18px 20px 20px; }
+.team-tags-body .ask-message { margin: 0; }
+.team-tag-list { display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 0; list-style: none; max-height: 320px; overflow-y: auto; }
+.team-tag-list:empty { display: none; }
+.team-tag-row { display: flex; align-items: center; gap: 8px; }
+.team-tag-row input, .team-tag-add input {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+}
+.team-tag-count { flex: none; min-width: 56px; color: var(--muted); font-size: 12px; text-align: right; }
+.team-tag-add { display: flex; gap: 6px; }
+.danger-text { color: var(--danger); }
+
+/* Open tasks by team: a full-width strip under the other cards. */
+.stats .stat-teams { grid-column: 1 / -1; }
+.stat-teams .people-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 2px 18px; }
+.stat-teams .person-row { grid-template-columns: 12px minmax(0, 1fr) 48px 22px; }
+
 /* ---------- responsive ---------- */
 
 @media (max-width: 1100px) {
@@ -1386,6 +1533,15 @@ dialog::backdrop { background: rgb(10 12 20 / 0.5); }
   .toolbar select { flex: 1 1 calc(50% - 4px); min-width: 0; }
   .column { flex-basis: 82vw; max-height: none; }
   .field-row { flex-direction: column; }
+  .checklist-item {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-areas: "check text remove" ". team team" ". person person";
+  }
+  .checklist-item > input[type="checkbox"] { grid-area: check; }
+  .checklist-item .checklist-text { grid-area: text; }
+  .checklist-item .checklist-team { grid-area: team; }
+  .checklist-item .checklist-person { grid-area: person; }
+  .checklist-item > button { grid-area: remove; }
   #new-task-btn { padding: 7px 10px; }
   .sync { display: none; }
   .account-name { display: none; }

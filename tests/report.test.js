@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createEmptyState, addTask, addSprint, moveTask } from '../js/store.js';
+import { createEmptyState, addTask, addSprint, moveTask, todayISO } from '../js/store.js';
 import { buildReport, reportToSheets, reportFileName, filterTasks } from '../js/report.js';
 
 function makeBoard() {
@@ -38,7 +38,7 @@ test('single-team sprint report: summary, sprint, tasks and breakdowns', () => {
   assert.equal(tasks.columns[0], 'Task', 'no team column for one team');
   const triage = tasks.rows.find((row) => row[0] === 'Faster triage');
   assert.deepEqual(triage.slice(0, 7), ['Faster triage', 'Service improvement item', 'Medium', 'Done', 'Ana', 'Sprint 7', 5]);
-  assert.equal(triage[10], today, 'completed date');
+  assert.equal(triage[11], todayISO(), 'completed on the real day it was moved to Done');
   assert.deepEqual(get('people').rows[0], ['Sam', 1, 0, 3, 3]);
   assert.deepEqual(get('types').rows.map((row) => row[0]), ['Enhancement', 'Defect', 'Service improvement item']);
   assert.deepEqual(get('status').rows.map((row) => row[0]), ['To Do', 'Done']);
@@ -67,4 +67,37 @@ test('report converts to sheets and a safe file name', () => {
   assert.deepEqual(sheets.map((s) => s.name), ['Summary', 'Task list', 'By person', 'By type', 'By status']);
   assert.ok(sheets[0].rows.some((row) => row[0] === 'Sprint summary'), 'sprint summary shares the first sheet');
   assert.equal(reportFileName(r, 'xlsx'), 'TaskFlow report - Design-UX - Sprint 7 - 2026-09-24.xlsx');
+});
+
+test('team tags: filter by team name, By team section and shared counts', async () => {
+  const { addTeamTag } = await import('../js/store.js');
+  let b = createEmptyState();
+  b = addTeamTag(addTeamTag(addTeamTag(b, 'Networks'), 'Cybersecurity'), 'Digital Hub');
+  const [net, cyber] = b.teamTags.map((t) => t.id);
+  b = addTask(b, { title: 'Firewall', status: 'todo', points: 5, teams: [net, cyber], assignees: ['name:Priya', 'name:Ana'],
+    checklist: [{ text: 'Open port', done: true }, { text: 'Review' }] });
+  b = addTask(b, { title: 'Switch swap', status: 'todo', points: 3, teams: [net], assignees: ['name:Priya'] });
+  b = addTask(b, { title: 'Loose end', status: 'todo' });
+  const all = buildReport({ entries: [{ teamName: 'DX', board: b }], today });
+  const get = (r, id) => r.sections.find((s) => s.id === id);
+  const tasks = get(all, 'tasks');
+  assert.deepEqual(tasks.columns.slice(0, 3), ['Task', 'Type', 'Teams']);
+  const fw = tasks.rows.find((r) => r[0] === 'Firewall');
+  assert.equal(fw[2], 'Networks, Cybersecurity');
+  assert.equal(fw[5], 'Priya, Ana');
+  assert.equal(fw[tasks.columns.indexOf('Checklist')], '1/2');
+  assert.deepEqual(get(all, 'teams').rows, [
+    ['Networks', 2, 0, 8, 1],
+    ['Cybersecurity', 1, 0, 5, 1],
+    ['Digital Hub', 0, 0, 0, 0],
+    ['No team', 1, 0, 0, 0],
+  ]);
+  assert.deepEqual(get(all, 'people').rows.slice(0, 2), [['Priya', 2, 0, 8, 8], ['Ana', 1, 0, 5, 5]], 'shared tasks count for each person');
+  assert.equal(Object.fromEntries(get(all, 'summary').rows)['Tasks shared by several teams'], 1);
+
+  const cyberOnly = buildReport({ entries: [{ teamName: 'DX', board: b }], filters: { team: 'cybersecurity' }, today });
+  assert.equal(cyberOnly.taskCount, 1);
+  assert.match(cyberOnly.scope, /cybersecurity/);
+  const none = buildReport({ entries: [{ teamName: 'DX', board: b }], filters: { team: 'none' }, today });
+  assert.deepEqual(get(none, 'tasks').rows.map((r) => r[0]), ['Loose end']);
 });

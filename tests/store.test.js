@@ -4,7 +4,7 @@ import {
   createEmptyState, createSampleState, addTask, updateTask, deleteTask, moveTask,
   tasksInColumn, getTask, isOverdue, isDueSoon, matchesFilter, getStats,
   addColumn, updateColumn, deleteColumn, isOverWip, normalizeState, normalizeTags,
-  loadState, saveState, STORAGE_KEY, assigneeKey, allAssigneeKeys, workload,
+  loadState, saveState, STORAGE_KEY, assigneeKey, allAssigneeKeys, workload, checklistProgress,
 } from '../js/store.js';
 
 const titles = (state, col) => tasksInColumn(state, col).map((t) => t.title);
@@ -394,4 +394,79 @@ test('tasksByDueDate groups by day, open and urgent first', async () => {
   const days = tasksByDueDate(s.tasks);
   assert.deepEqual([...days.keys()].sort(), ['2026-09-24', '2026-09-25']);
   assert.deepEqual(days.get('2026-09-24').map((t) => t.title), ['c urgent', 'b low', 'a done urgent']);
+});
+
+test('tasks can have several assignees; old single-assignee tasks still load', async () => {
+  const { normalizeState, assigneeKeys, workload, allAssigneeKeys } = await import('../js/store.js');
+  const s = normalizeState({
+    tasks: [
+      { title: 'Old', status: 'todo', assigneeId: 'u_1' },
+      { title: 'Shared', status: 'todo', assignees: ['id:u_1', 'name:Sam', 'id:u_1', 'bogus', { id: 'u_2' }] },
+      { title: 'Nobody', status: 'todo' },
+      { title: 'Done', status: 'done', assignees: ['id:u_2'] },
+    ],
+  });
+  const get = (title) => s.tasks.find((t) => t.title === title);
+  assert.deepEqual(assigneeKeys(get('Old')), ['id:u_1']);
+  assert.deepEqual(get('Shared').assignees, ['id:u_1', 'name:Sam', 'id:u_2']);
+  assert.equal(get('Shared').assigneeId, 'u_1', 'the lead is mirrored for older copies of the app');
+  assert.deepEqual(get('Nobody').assignees, []);
+  const load = workload(s);
+  assert.equal(load.get('id:u_1'), 2, 'a shared task counts for each person');
+  assert.equal(load.get('name:Sam'), 1);
+  assert.equal(load.get('id:u_2'), 1, 'done tasks are not counted');
+  assert.equal(load.get(''), 1);
+  assert.deepEqual(allAssigneeKeys(s).sort(), ['id:u_1', 'id:u_2', 'name:Sam']);
+  const shared = get('Shared');
+  assert.equal(matchesFilter(shared, { assignee: 'name:Sam' }), true);
+  assert.equal(matchesFilter(shared, { assignee: 'me' }, undefined, { meKeys: ['id:u_2'] }), true);
+  assert.equal(matchesFilter(shared, { assignee: 'none' }), false);
+  // Editing with the old fields only keeps working when assignees is replaced.
+  const edited = updateTask(s, shared.id, { assignees: ['name:Ana'] });
+  assert.deepEqual(getTask(edited, shared.id).assignees, ['name:Ana']);
+  assert.equal(getTask(edited, shared.id).assignee, 'Ana');
+});
+
+test('team tags: add, rename, delete and filter', async () => {
+  const { addTeamTag, renameTeamTag, deleteTeamTag, teamWorkload, normalizeState } = await import('../js/store.js');
+  let s = createEmptyState();
+  for (const name of ['Digital Hub', 'Networks', 'networks', '  ', 'Cybersecurity']) s = addTeamTag(s, name);
+  assert.deepEqual(s.teamTags.map((t) => t.name), ['Digital Hub', 'Networks', 'Cybersecurity'], 'no duplicates or blanks');
+  assert.deepEqual(s.teamTags.map((t) => t.color), [0, 1, 2]);
+  const [hub, net, cyber] = s.teamTags.map((t) => t.id);
+  s = addTask(s, { title: 'Firewall change', status: 'todo', teams: [net, cyber], checklist: [
+    { text: 'Open port', team: net, person: 'name:Priya' },
+    { text: 'Review rule', team: cyber, done: true },
+    { text: '   ' },
+  ] });
+  s = addTask(s, { title: 'Portal', status: 'todo', teams: [hub] });
+  s = addTask(s, { title: 'Loose', status: 'todo' });
+  const fw = s.tasks.find((t) => t.title === 'Firewall change');
+  assert.equal(fw.checklist.length, 2, 'blank steps are dropped');
+  assert.equal(fw.checklist[0].person, 'name:Priya');
+  assert.deepEqual(checklistProgress(fw), { done: 1, total: 2 });
+  const load = teamWorkload(s);
+  assert.equal(load.get(net), 1);
+  assert.equal(load.get(cyber), 1);
+  assert.equal(load.get(''), 1);
+  assert.equal(matchesFilter(fw, { team: cyber }), true);
+  assert.equal(matchesFilter(fw, { team: hub }), false);
+  assert.equal(matchesFilter(fw, { team: 'none' }), false);
+  assert.equal(matchesFilter(fw, { query: 'network' }, undefined, { teamName: (id) => s.teamTags.find((t) => t.id === id)?.name }), true);
+  assert.equal(matchesFilter(fw, { query: 'review rule' }), true, 'search covers checklist steps');
+
+  assert.equal(renameTeamTag(s, net, 'Cybersecurity'), s, 'rename refuses a duplicate name');
+  s = renameTeamTag(s, net, 'Networks & Telecom');
+  assert.equal(s.teamTags[1].name, 'Networks & Telecom');
+
+  s = deleteTeamTag(s, cyber);
+  const after = s.tasks.find((t) => t.title === 'Firewall change');
+  assert.deepEqual(after.teams, [net]);
+  assert.equal(after.checklist[1].team, '', 'checklist steps lose the deleted team');
+  assert.equal(after.checklist.length, 2, 'but the steps stay');
+
+  // Round trip through storage, dropping unknown team ids.
+  const loaded = normalizeState(JSON.parse(JSON.stringify({ ...s, tasks: [...s.tasks, { title: 'Ghost', status: 'todo', teams: ['nope', hub] }] })));
+  assert.deepEqual(loaded.teamTags, s.teamTags);
+  assert.deepEqual(loaded.tasks.find((t) => t.title === 'Ghost').teams, [hub]);
 });

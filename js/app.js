@@ -2,7 +2,8 @@ import {
   PRIORITIES, DONE_COLUMN_ID, TASK_TYPES, TASK_TYPE_LABELS, TASK_TYPE_SHORT, POINT_SCALE, cleanPoints, sumPoints,
   createEmptyState, createSampleState, normalizeState, normalizeTags,
   tasksInColumn, getTask, isOverdue, isDueSoon, allTags, matchesFilter, getStats,
-  assigneeKey, allAssigneeKeys, workload,
+  assigneeKey, assigneeKeys, allAssigneeKeys, workload, teamWorkload, personKey, MAX_ASSIGNEES,
+  teamTagsOf, addTeamTag, renameTeamTag, deleteTeamTag, MAX_TEAM_TAGS, checklistProgress, MAX_CHECKLIST,
   sprintsOf, getSprint, activeSprint, nextSprintDefaults, addSprint, updateSprint, startSprint,
   completeSprint, deleteSprint, setSprintTasks, tasksInView, daysLeft, recordBurndown, burndownSeries,
   sprintLoad, velocity, monthGrid, tasksByDueDate,
@@ -45,7 +46,7 @@ const people = new Map(); // account id -> { name, avatarUrl, color }
 // ('all', 'backlog' or a sprint id), or null for "the active sprint".
 let sprintChoice = null;
 
-const EMPTY_FILTER = { query: '', priority: '', type: '', assignee: '', tag: '', due: '' };
+const EMPTY_FILTER = { query: '', priority: '', type: '', assignee: '', tag: '', due: '', team: '' };
 let filter = { ...EMPTY_FILTER };
 let editingId = null;
 
@@ -143,20 +144,33 @@ function meKeys() {
   return identity.id && backend?.kind === 'cloud' ? [`id:${identity.id}`] : [`name:${identity.name}`];
 }
 
+// Every assignee's name, joined: "Priya Shah, Ana Silva".
+const namesOf = (t) => assigneeKeys(t).map((key) => personFor(key).name).join(', ');
+
 const peopleContext = () => ({
   meKeys: meKeys(),
-  nameOf: (t) => {
-    const key = assigneeKey(t);
-    return key ? personFor(key).name : '';
-  },
+  nameOf: namesOf,
+  teamName: (id) => teamTagFor(id)?.name ?? '',
 });
+
+// ---------- team tags ----------
+
+function teamTagFor(id, board = state) {
+  return teamTagsOf(board).find((tt) => tt.id === id) ?? null;
+}
+
+// A small coloured label for a team tag.
+function teamPill(tag, extra = '') {
+  return h('span', { class: `team-pill team-c${tag.color}${extra ? ` ${extra}` : ''}`, title: `Team: ${tag.name}` }, tag.name);
+}
 
 // Resolve names/avatars for the accounts on the board; re-render if any
 // changed. The platform caches these, so calling it on every render is cheap.
 function refreshPeople() {
   if (!userApi) return;
   const ids = [...new Set([
-    ...state.tasks.map((t) => t.assigneeId).filter(Boolean),
+    ...state.tasks.flatMap((t) => [...assigneeKeys(t), ...t.checklist.map((c) => c.person)])
+      .filter((k) => k.startsWith('id:')).map((k) => k.slice(3)),
     ...teamMembers(currentTeam()),
   ])];
   if (!ids.length) return;
@@ -879,13 +893,14 @@ function openPlanDialog(sprint) {
   $('#plan-search').value = '';
   const columnName = (id) => state.columns.find((c) => c.id === id)?.title ?? '';
   const row = (task, checked) => {
-    const key = assigneeKey(task);
-    return h('li', { dataset: { search: `${task.title} ${task.tags.join(' ')} ${key ? personFor(key).name : ''}`.toLowerCase() } },
+    const names = assigneeKeys(task).map((k) => shortName(personFor(k).name));
+    const teamNames = task.teams.map((id) => teamTagFor(id)?.name).filter(Boolean);
+    return h('li', { dataset: { search: `${task.title} ${task.tags.join(' ')} ${namesOf(task)} ${teamNames.join(' ')}`.toLowerCase() } },
       h('label', { class: 'plan-row' },
         h('input', { type: 'checkbox', value: task.id, checked, onchange: updatePlanCount }),
         task.type ? h('span', { class: `type-badge type-${task.type}` }, TASK_TYPE_SHORT[task.type]) : h('span'),
         h('span', { class: 'plan-title' }, task.title),
-        h('span', { class: 'plan-meta' }, [columnName(task.status), key ? shortName(personFor(key).name) : null].filter(Boolean).join(' · ')),
+        h('span', { class: 'plan-meta' }, [columnName(task.status), teamNames.join(', '), names.join(', ')].filter(Boolean).join(' · ')),
         h('span', { class: 'plan-points', title: task.points === null ? 'Not estimated' : pts(task.points) },
           task.points === null ? '–' : task.points)));
   };
@@ -1303,8 +1318,9 @@ function rescheduleTask(id, dueDate) {
 function calendarChip(task, today) {
   const done = task.status === DONE_COLUMN_ID;
   const late = isOverdue(task, today);
-  const key = assigneeKey(task);
-  const person = key ? personFor(key) : null;
+  const keys = assigneeKeys(task);
+  const person = keys.length ? personFor(keys[0]) : null;
+  const teamNames = task.teams.map((id) => teamTagFor(id)?.name).filter(Boolean);
   // A focusable div rather than a <button>: Firefox won't drag buttons.
   const chip = h('div', {
     role: 'button',
@@ -1318,7 +1334,8 @@ function calendarChip(task, today) {
         chip.click();
       }
     },
-    title: [task.title, TASK_TYPE_LABELS[task.type], person ? `Assigned to ${person.name}` : 'Unassigned', late ? 'Overdue' : '']
+    title: [task.title, TASK_TYPE_LABELS[task.type], teamNames.length ? `Teams: ${teamNames.join(', ')}` : '',
+      keys.length ? `Assigned to ${namesOf(task)}` : 'Unassigned', late ? 'Overdue' : '']
       .filter(Boolean).join(' · '),
     onclick: () => openTaskDialog(task.id),
     ondragstart: (e) => {
@@ -1333,7 +1350,8 @@ function calendarChip(task, today) {
   },
   task.type ? h('i', { class: `cal-type type-${task.type}`, 'aria-hidden': 'true' }) : null,
   h('span', { class: 'cal-title' }, task.title),
-  person ? avatarEl(person, 'avatar tiny') : null);
+  person ? avatarEl(person, 'avatar tiny') : null,
+  keys.length > 1 ? h('span', { class: 'cal-extra', 'aria-hidden': 'true' }, `+${keys.length - 1}`) : null);
   return chip;
 }
 
@@ -1539,7 +1557,42 @@ function renderStats() {
     progress,
     distribution,
     renderPeopleStat(),
+    renderTeamStat(),
   );
+}
+
+// Open tasks per team tag; clicking a row filters the board to that team.
+// A task shared by several teams counts for each of them.
+function renderTeamStat() {
+  const tags = teamTagsOf(state);
+  if (!tags.length) return null;
+  const load = teamWorkload(viewState());
+  const none = load.get('') ?? 0;
+  const max = Math.max(1, ...load.values());
+  const shared = viewState().tasks.filter((t) => t.status !== DONE_COLUMN_ID && t.teams.length > 1).length;
+  const row = (value, label, n, tag) => {
+    const active = filter.team === value;
+    return h('li', {},
+      h('button', {
+        class: `person-row${active ? ' is-active' : ''}`,
+        'aria-pressed': String(active),
+        title: active ? 'Show all teams' : `Show only ${label} tasks`,
+        onclick: () => {
+          filter.team = active ? '' : value;
+          render();
+        },
+      },
+      h('i', { class: `team-dot${tag ? ` team-c${tag.color}` : ' is-none'}`, 'aria-hidden': 'true' }),
+      h('span', { class: 'person-name' }, label),
+      h('span', { class: 'person-bar' }, h('i', { style: `width:${Math.round((n / max) * 100)}%` })),
+      h('span', { class: 'person-count' }, n)));
+  };
+  return h('div', { class: 'stat stat-wide stat-people stat-teams' },
+    h('div', { class: 'stat-label' }, 'Open tasks by team'),
+    h('ul', { class: 'people-list' },
+      tags.map((tag) => row(tag.id, tag.name, load.get(tag.id) ?? 0, tag)),
+      none ? row('none', 'No team', none, null) : null),
+    shared ? h('div', { class: 'stat-sub' }, `${shared} shared by more than one team`) : null);
 }
 
 // Open tasks per person; clicking a row filters the board to them.
@@ -1599,6 +1652,15 @@ function renderFilters() {
   if (!options.some(([v]) => v === filter.assignee)) filter.assignee = '';
   $('#filter-assignee').replaceChildren(...options.map(([value, label]) => h('option', { value, selected: value === filter.assignee }, label)));
   fillSelect($('#filter-tag'), 'All tags', allTags(state), filter.tag);
+  const tags = teamTagsOf(state);
+  if (filter.team && filter.team !== 'none' && !teamTagFor(filter.team)) filter.team = '';
+  if (!tags.length) filter.team = '';
+  const teamSelect = $('#filter-team');
+  teamSelect.hidden = !tags.length;
+  teamSelect.replaceChildren(
+    h('option', { value: '' }, 'All teams'),
+    ...tags.map((tag) => h('option', { value: tag.id, selected: tag.id === filter.team }, tag.name)),
+    h('option', { value: 'none', selected: filter.team === 'none' }, 'No team'));
   const active = Object.values(filter).some(Boolean);
   $('#clear-filters').hidden = !active;
   boardEl.classList.toggle('is-filtered', active);
@@ -1663,11 +1725,13 @@ function renderCard(task) {
   const overdue = isOverdue(task);
   const soon = isDueSoon(task);
   const done = task.status === DONE_COLUMN_ID;
+  const teams = task.teams.map((id) => teamTagFor(id)).filter(Boolean);
+  const progress = checklistProgress(task);
   return h('article', {
     class: `card priority-${task.priority}${done ? ' is-done' : ''}`,
     tabindex: 0,
     dataset: { id: task.id },
-    'aria-label': `${task.title}, ${task.type ? `${TASK_TYPE_LABELS[task.type]}, ` : ''}${task.priority} priority, ${task.points !== null ? `${pts(task.points)}, ` : ''}${assigneeKey(task) ? `assigned to ${personFor(assigneeKey(task)).name}` : 'unassigned'}`,
+    'aria-label': `${task.title}, ${task.type ? `${TASK_TYPE_LABELS[task.type]}, ` : ''}${task.priority} priority, ${task.points !== null ? `${pts(task.points)}, ` : ''}${teams.length ? `teams ${teams.map((t) => t.name).join(', ')}, ` : ''}${progress.total ? `checklist ${progress.done} of ${progress.total} done, ` : ''}${assigneeKey(task) ? `assigned to ${namesOf(task)}` : 'unassigned'}`,
     onkeydown: (e) => onCardKey(e, task),
   },
   h('div', { class: 'card-top' },
@@ -1681,6 +1745,12 @@ function renderCard(task) {
     }, formatDue(task.dueDate)) : null),
   h('h4', { class: 'card-title' }, task.title),
   task.description ? h('p', { class: 'card-desc' }, task.description) : null,
+  teams.length || progress.total ? h('div', { class: 'card-teams' },
+    teams.map((tag) => teamPill(tag)),
+    progress.total ? h('span', {
+      class: `checklist-badge${progress.done === progress.total ? ' is-complete' : ''}`,
+      title: checklistTitle(task),
+    }, `☑ ${progress.done}/${progress.total}`) : null) : null,
   h('div', { class: 'card-bottom' },
     h('div', { class: 'tags' },
       currentView() === 'all' && task.sprintId
@@ -1690,12 +1760,29 @@ function renderCard(task) {
 }
 
 function renderAssignee(task) {
-  const key = assigneeKey(task);
-  if (!key) return h('span', { class: 'assignee is-none' }, 'Unassigned');
-  const person = personFor(key);
-  return h('span', { class: `assignee${person.isMe ? ' is-me' : ''}`, title: `Assigned to ${person.name}` },
-    avatarEl(person, 'avatar small'),
-    h('span', { class: 'assignee-name' }, person.isMe ? 'You' : shortName(person.name)));
+  const keys = assigneeKeys(task);
+  if (!keys.length) return h('span', { class: 'assignee is-none' }, 'Unassigned');
+  const everyone = keys.map(personFor);
+  const lead = everyone[0];
+  const mine = everyone.some((p) => p.isMe);
+  if (keys.length === 1) {
+    return h('span', { class: `assignee${mine ? ' is-me' : ''}`, title: `Assigned to ${lead.name}` },
+      avatarEl(lead, 'avatar small'),
+      h('span', { class: 'assignee-name' }, lead.isMe ? 'You' : shortName(lead.name)));
+  }
+  return h('span', { class: `assignee is-many${mine ? ' is-me' : ''}`, title: `Assigned to ${everyone.map((p) => p.name).join(', ')}` },
+    h('span', { class: 'avatar-stack' }, everyone.slice(0, 3).map((p) => avatarEl(p, 'avatar small'))),
+    h('span', { class: 'assignee-name' }, `${lead.isMe ? 'You' : shortName(lead.name)} +${keys.length - 1}`));
+}
+
+// "Networks: Open firewall port ✓ (Priya S.)" per line, for tooltips.
+function checklistTitle(task) {
+  const { done, total } = checklistProgress(task);
+  return [`Checklist: ${done} of ${total} done`, ...task.checklist.map((c) => {
+    const team = c.team ? teamTagFor(c.team)?.name : '';
+    const who = c.person ? shortName(personFor(c.person).name) : '';
+    return `${c.done ? '✓' : '○'} ${team ? `${team}: ` : ''}${c.text}${who ? ` (${who})` : ''}`;
+  })].join('\n');
 }
 
 function renderAddColumn() {
@@ -1747,8 +1834,13 @@ function openTaskDialog(id = null, columnId = null, preset = {}) {
   // select the "None" option.
   for (const radio of form.type) radio.checked = radio.value === (task?.type ?? '');
   form.dueDate.value = task?.dueDate ?? preset.dueDate ?? '';
-  draftAssignee = task?.assigneeId ? { id: task.assigneeId } : task?.assignee ? { name: task.assignee } : null;
+  draftAssignees = task ? [...assigneeKeys(task)] : [];
+  draftTeams = task ? [...task.teams] : presetTeams();
+  draftChecklist = task ? task.checklist.map((c) => ({ ...c })) : [];
   $('#assignee-input').value = '';
+  $('#checklist-input').value = '';
+  renderTeamOptions();
+  renderChecklist();
   resultItems = [];
   renderResults();
   renderChosen();
@@ -1778,9 +1870,12 @@ form.addEventListener('submit', (e) => {
     tags: normalizeTags(form.tags.value),
   };
   const leftover = $('#assignee-input').value.trim();
-  if (!draftAssignee && leftover) draftAssignee = { name: leftover };
-  fields.assigneeId = draftAssignee?.id ?? '';
-  fields.assignee = draftAssignee?.name ?? '';
+  if (leftover) addDraftAssignee(personKey({ name: leftover }));
+  const pending = $('#checklist-input').value.trim();
+  if (pending) addChecklistItem(pending);
+  fields.assignees = [...draftAssignees];
+  fields.teams = draftTeams.filter((id) => teamTagFor(id));
+  fields.checklist = draftChecklist.map((c) => ({ ...c, text: c.text.trim() })).filter((c) => c.text);
   if (!fields.title) {
     form.title.focus();
     return;
@@ -1811,34 +1906,51 @@ function renderPointOptions(current) {
 // Hosted on claude.ai it searches people in the organization; everywhere
 // it also offers names already used on the board, or any typed name.
 
-let draftAssignee = null; // { id } | { name } | null
+let draftAssignees = []; // assignee keys, lead first
 let resultItems = [];
 let activeResult = 0;
 
 const keyOf = (item) => (item.id ? `id:${item.id}` : `name:${item.name}`);
 
+function addDraftAssignee(key) {
+  if (!key || draftAssignees.includes(key) || draftAssignees.length >= MAX_ASSIGNEES) return;
+  draftAssignees.push(key);
+  renderChosen();
+  renderChecklist();
+}
+
+function removeDraftAssignee(key) {
+  draftAssignees = draftAssignees.filter((k) => k !== key);
+  // Their checklist steps go back to having no one.
+  for (const item of draftChecklist) if (item.person === key) item.person = '';
+  renderChosen();
+  renderChecklist();
+}
+
 function renderChosen() {
   const chosen = $('#assignee-chosen');
   const input = $('#assignee-input');
-  if (draftAssignee) {
-    const person = personFor(keyOf(draftAssignee));
-    chosen.replaceChildren(
+  chosen.replaceChildren(...draftAssignees.map((key, i) => {
+    const person = personFor(key);
+    return h('li', { class: 'assignee-chip' },
       avatarEl(person, 'avatar small'),
       h('span', { class: 'chosen-name' }, person.isMe ? `${person.name} (you)` : person.name),
+      i === 0 && draftAssignees.length > 1 ? h('span', { class: 'lead-tag', title: 'Listed first on the card' }, 'lead') : null,
       h('button', {
         type: 'button',
         class: 'chip-clear',
-        'aria-label': 'Remove assignee',
+        'aria-label': `Remove ${person.name}`,
         onclick: () => {
-          draftAssignee = null;
-          renderChosen();
+          removeDraftAssignee(key);
           input.focus();
         },
       }, '✕'));
-  }
-  chosen.hidden = !draftAssignee;
-  input.hidden = Boolean(draftAssignee);
-  $('#assign-me').hidden = !identity || Boolean(draftAssignee && personFor(keyOf(draftAssignee)).isMe);
+  }));
+  chosen.hidden = !draftAssignees.length;
+  const full = draftAssignees.length >= MAX_ASSIGNEES;
+  input.hidden = full;
+  input.placeholder = draftAssignees.length ? 'Add another person…' : 'Search people…';
+  $('#assign-me').hidden = !identity || full || meKeys().some((k) => draftAssignees.includes(k));
 }
 
 async function updateResults() {
@@ -1865,10 +1977,12 @@ async function updateResults() {
     const name = key.slice(5);
     if (!lower || name.toLowerCase().includes(lower)) items.push({ name });
   }
+  const chosen = new Set(draftAssignees);
+  const fresh = items.filter((it) => !chosen.has(keyOf(it)));
   if (query && !items.some((it) => personFor(keyOf(it)).name.toLowerCase() === lower)) {
-    items.push({ name: query, isNew: true });
+    fresh.push({ name: query, isNew: true });
   }
-  resultItems = items.slice(0, 8);
+  resultItems = fresh.slice(0, 8);
   activeResult = 0;
   renderResults();
 }
@@ -1904,11 +2018,10 @@ function notOnTeam(id) {
 }
 
 function chooseAssignee(item) {
-  draftAssignee = item.id ? { id: item.id } : { name: item.name };
   $('#assignee-input').value = '';
   resultItems = [];
+  addDraftAssignee(keyOf(item));
   renderResults();
-  renderChosen();
 }
 
 $('#assignee-input').addEventListener('focus', updateResults);
@@ -1928,13 +2041,260 @@ $('#assignee-input').addEventListener('keydown', (e) => {
     e.preventDefault();
     resultItems = [];
     renderResults();
+  } else if (e.key === 'Backspace' && !e.target.value && draftAssignees.length) {
+    removeDraftAssignee(draftAssignees[draftAssignees.length - 1]);
   }
 });
 
 $('#assign-me').addEventListener('click', () => {
   if (!identity) return;
-  draftAssignee = identity.id && backend?.kind === 'cloud' ? { id: identity.id } : { name: identity.name };
-  renderChosen();
+  addDraftAssignee(meKeys()[0]);
+});
+
+// ---------- team tags dialog ----------
+
+const teamTagsDialog = $('#team-tags-dialog');
+
+function openTeamTags() {
+  if (!teamId) return toast('Pick or create a team first');
+  closePopups();
+  renderTeamTagList();
+  $('#team-tag-input').value = '';
+  teamTagsDialog.showModal();
+  $('#team-tag-input').focus();
+}
+
+function renderTeamTagList() {
+  const tags = teamTagsOf(state);
+  $('#team-tags-board').textContent = currentTeam()?.name ?? 'this board';
+  const openCount = (id) => state.tasks.filter((t) => t.teams.includes(id)).length;
+  $('#team-tag-list').replaceChildren(...tags.map((tag) => {
+    const n = openCount(tag.id);
+    return h('li', { class: 'team-tag-row' },
+      h('i', { class: `team-dot team-c${tag.color}`, 'aria-hidden': 'true' }),
+      h('input', {
+        value: tag.name,
+        maxlength: 40,
+        'aria-label': `Rename ${tag.name}`,
+        onchange: (e) => {
+          const next = renameTeamTag(state, tag.id, e.target.value);
+          if (next === state) {
+            e.target.value = tag.name;
+            if (e.target.value.trim()) toast('There’s already a team tag with that name');
+            return;
+          }
+          commit(next);
+          renderTeamTagList();
+        },
+        onkeydown: (e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            e.target.blur();
+          }
+        },
+      }),
+      h('span', { class: 'team-tag-count' }, `${n} task${n === 1 ? '' : 's'}`),
+      h('button', {
+        type: 'button',
+        class: 'btn btn-ghost small danger-text',
+        'aria-label': `Delete ${tag.name}`,
+        onclick: async () => {
+          if (n && !await ask({
+            title: `Delete “${tag.name}”?`,
+            message: `It comes off ${n} task${n === 1 ? '' : 's'} and their checklists. The tasks themselves stay.`,
+            okLabel: 'Delete tag',
+            danger: true,
+          })) return;
+          const before = state;
+          commit(deleteTeamTag(state, tag.id));
+          renderTeamTagList();
+          toast(`Deleted “${tag.name}”`, { label: 'Undo', run: () => { commit(before); if (teamTagsDialog.open) renderTeamTagList(); } });
+        },
+      }, 'Delete'));
+  }));
+  $('#team-tag-empty').hidden = tags.length > 0;
+  const full = tags.length >= MAX_TEAM_TAGS;
+  $('#team-tag-input').disabled = full;
+  $('#team-tag-input').placeholder = full ? `Up to ${MAX_TEAM_TAGS} team tags` : 'Team name, e.g. Networks';
+}
+
+$('#team-tag-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const input = $('#team-tag-input');
+  let next = state;
+  const skipped = [];
+  for (const name of input.value.split(/[,\n]/)) {
+    if (!name.trim()) continue;
+    const added = addTeamTag(next, name);
+    if (added === next) skipped.push(name.trim());
+    next = added;
+  }
+  if (next !== state) commit(next);
+  if (skipped.length) toast(`Already on the list: ${skipped.join(', ')}`);
+  input.value = '';
+  renderTeamTagList();
+  input.focus();
+});
+
+teamTagsDialog.addEventListener('click', (e) => {
+  if (e.target === teamTagsDialog || e.target.closest('[data-close]')) teamTagsDialog.close();
+});
+
+// The task dialog may be open underneath: refresh its team choices.
+teamTagsDialog.addEventListener('close', () => {
+  if (dialog.open) {
+    draftTeams = draftTeams.filter((id) => teamTagFor(id));
+    for (const item of draftChecklist) if (item.team && !teamTagFor(item.team)) item.team = '';
+    renderTeamOptions();
+    renderChecklist();
+  }
+});
+
+// ---------- teams and checklist in the task dialog ----------
+
+let draftTeams = []; // team tag ids
+let draftChecklist = []; // { id, text, done, team, person }
+
+// A new task starts with the team the board is filtered to, if any.
+function presetTeams() {
+  return filter.team && filter.team !== 'none' && teamTagFor(filter.team) ? [filter.team] : [];
+}
+
+function renderTeamOptions() {
+  const box = $('#team-options');
+  const tags = teamTagsOf(state);
+  if (!tags.length) {
+    box.replaceChildren(
+      h('span', { class: 'field-hint' }, 'No team tags on this board yet. '),
+      h('button', { type: 'button', class: 'link-btn', onclick: () => openTeamTags() }, 'Set up team tags'));
+    return;
+  }
+  box.replaceChildren(
+    ...tags.map((tag) => h('label', { class: `team-option team-c${tag.color}` },
+      h('input', {
+        type: 'checkbox',
+        value: tag.id,
+        checked: draftTeams.includes(tag.id),
+        onchange: (e) => {
+          draftTeams = e.target.checked ? [...draftTeams, tag.id] : draftTeams.filter((id) => id !== tag.id);
+          renderChecklist();
+        },
+      }),
+      tag.name)),
+    h('button', { type: 'button', class: 'link-btn', onclick: () => openTeamTags() }, 'Manage'));
+}
+
+function addChecklistItem(text) {
+  const clean = text.replace(/\s+/g, ' ').trim().slice(0, 200);
+  if (!clean || draftChecklist.length >= MAX_CHECKLIST) return false;
+  // New steps default to the only team / person when there's just one.
+  draftChecklist.push({
+    id: `c_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+    text: clean,
+    done: false,
+    team: draftTeams.length === 1 ? draftTeams[0] : '',
+    person: '',
+  });
+  return true;
+}
+
+function renderChecklist() {
+  const list = $('#checklist');
+  const tags = teamTagsOf(state);
+  // The task's teams first, then the rest of the board's.
+  const teamChoices = [...tags.filter((t) => draftTeams.includes(t.id)), ...tags.filter((t) => !draftTeams.includes(t.id))];
+  list.replaceChildren(...draftChecklist.map((item, i) => {
+    const teamSelect = tags.length ? h('select', {
+      class: 'checklist-team',
+      'aria-label': `Team for “${item.text}”`,
+      onchange: (e) => {
+        item.team = e.target.value;
+        // A step's team is working on the task, so tick it.
+        if (item.team && !draftTeams.includes(item.team)) {
+          draftTeams.push(item.team);
+          renderTeamOptions();
+        }
+        renderChecklist();
+      },
+    },
+    h('option', { value: '' }, 'No team'),
+    teamChoices.map((t) => h('option', { value: t.id, selected: t.id === item.team }, t.name))) : null;
+    const personSelect = h('select', {
+      class: 'checklist-person',
+      'aria-label': `Person for “${item.text}”`,
+      disabled: !draftAssignees.length,
+      title: draftAssignees.length ? 'Who does this step' : 'Add assignees to the task to pick who does each step',
+      onchange: (e) => { item.person = e.target.value; },
+    },
+    h('option', { value: '' }, 'No one'),
+    draftAssignees.map((key) => h('option', { value: key, selected: key === item.person }, shortName(personFor(key).name))));
+    const tag = item.team ? teamTagFor(item.team) : null;
+    return h('li', { class: `checklist-item${item.done ? ' is-done' : ''}${tag ? ` team-c${tag.color}` : ''}` },
+      h('input', {
+        type: 'checkbox',
+        checked: item.done,
+        'aria-label': `Done: ${item.text}`,
+        onchange: (e) => {
+          item.done = e.target.checked;
+          e.target.closest('li').classList.toggle('is-done', item.done);
+          renderChecklistProgress();
+        },
+      }),
+      h('input', {
+        class: 'checklist-text',
+        value: item.text,
+        maxlength: 200,
+        'aria-label': `Checklist item ${i + 1}`,
+        oninput: (e) => { item.text = e.target.value; },
+        onkeydown: (e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            $('#checklist-input').focus();
+          }
+        },
+      }),
+      teamSelect,
+      personSelect,
+      h('button', {
+        type: 'button',
+        class: 'icon-btn btn-ghost small',
+        'aria-label': `Remove “${item.text}”`,
+        title: 'Remove',
+        onclick: () => {
+          draftChecklist.splice(draftChecklist.indexOf(item), 1);
+          renderChecklist();
+          $('#checklist-input').focus();
+        },
+      }, '✕'));
+  }));
+  list.hidden = !draftChecklist.length;
+  const full = draftChecklist.length >= MAX_CHECKLIST;
+  $('#checklist-input').disabled = full;
+  $('#checklist-add-btn').disabled = full;
+  renderChecklistProgress();
+}
+
+function renderChecklistProgress() {
+  const done = draftChecklist.filter((c) => c.done).length;
+  $('#checklist-progress').textContent = draftChecklist.length ? `(${done} of ${draftChecklist.length} done)` : '';
+}
+
+function addChecklistFromInput() {
+  const input = $('#checklist-input');
+  if (addChecklistItem(input.value)) {
+    input.value = '';
+    renderChecklist();
+  }
+  input.focus();
+}
+
+$('#checklist-add-btn').addEventListener('click', addChecklistFromInput);
+$('#checklist-input').addEventListener('keydown', (e) => {
+  // Enter adds a step instead of submitting the whole form.
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    addChecklistFromInput();
+  }
 });
 
 dialog.addEventListener('click', (e) => {
@@ -2270,6 +2630,7 @@ const reportsDialog = $('#reports-dialog');
 const report = {
   team: null, // a team id, or 'all'
   view: 'all',
+  teamTag: '', // a team tag name, 'none' or '' for all
   include: new Set(REPORT_SECTIONS.map((s) => s.id)),
   boards: new Map(), // team id -> board, for this opening of the dialog
   data: null, // the last report built
@@ -2283,6 +2644,8 @@ function openReports() {
   report.view = currentView();
   $('#report-state').value = 'all';
   $('#report-type').value = '';
+  // Start from the board's team filter, so "Networks" opens a Networks report.
+  report.teamTag = filter.team === 'none' ? 'none' : teamTagFor(filter.team)?.name ?? '';
   const teamOptions = teams.map((t) => h('option', { value: t.id }, t.name || 'Untitled team'));
   if (teams.length > 1) {
     teamOptions.push(h('option', { value: 'all' }, canManageTeams ? 'All teams' : 'All my teams'));
@@ -2334,7 +2697,8 @@ async function refreshReport() {
   try {
     boards = await loadReportBoards(ids);
     // Names for everyone assigned on these boards.
-    const accountIds = [...new Set(boards.flatMap((b) => b.tasks.map((t) => t.assigneeId)).filter(Boolean))];
+    const accountIds = [...new Set(boards.flatMap((b) => b.tasks.flatMap(assigneeKeys))
+      .filter((k) => k.startsWith('id:')).map((k) => k.slice(3)))];
     if (userApi && accountIds.length) {
       const profiles = await userApi.profiles(accountIds);
       for (const [id, p] of Object.entries(profiles)) people.set(id, { name: p.name, avatarUrl: p.avatarUrl, color: p.color });
@@ -2364,6 +2728,23 @@ async function refreshReport() {
     viewSelect.disabled = false;
     viewSelect.value = report.view;
   }
+  // Team tags from every board in the report, matched by name.
+  const tagNames = [];
+  for (const tag of boards.flatMap((b) => teamTagsOf(b))) {
+    if (!tagNames.some((n) => n.toLowerCase() === tag.name.toLowerCase())) tagNames.push(tag.name);
+  }
+  if (report.teamTag && report.teamTag !== 'none' && !tagNames.some((n) => n.toLowerCase() === report.teamTag.toLowerCase())) report.teamTag = '';
+  if (!tagNames.length) report.teamTag = '';
+  const tagSelect = $('#report-team-tag');
+  tagSelect.closest('.field').hidden = !tagNames.length;
+  tagSelect.replaceChildren(
+    h('option', { value: '' }, 'All teams'),
+    ...tagNames.map((n) => h('option', { value: n, selected: n === report.teamTag }, n)),
+    h('option', { value: 'none', selected: report.teamTag === 'none' }, 'No team tag'));
+  const teamsBox = $('#report-sections').querySelector('input[value="teams"]');
+  teamsBox.disabled = !tagNames.length;
+  teamsBox.parentElement.title = tagNames.length ? '' : 'Add team tags to a board to break reports down by team';
+
   const sprintChosen = ids.length === 1 && getSprint(boards[0], report.view);
   const sprintBox = $('#report-sections').querySelector('input[value="sprint"]');
   sprintBox.disabled = !sprintChosen;
@@ -2373,12 +2754,9 @@ async function refreshReport() {
   report.data = buildReport({
     entries: ids.map((id, i) => ({ teamName: teamName(id), board: boards[i] })),
     view: report.view,
-    filters: { status: $('#report-state').value, type: $('#report-type').value },
+    filters: { status: $('#report-state').value, type: $('#report-type').value, team: report.teamTag },
     include: [...report.include],
-    nameOf: (t) => {
-      const key = assigneeKey(t);
-      return key ? personFor(key).name : '';
-    },
+    personName: (key) => personFor(key).name,
   });
   renderReportPreview(report.data);
   const hasContent = report.data.sections.length > 0;
@@ -2426,6 +2804,10 @@ $('#report-view').addEventListener('change', (e) => {
 });
 $('#report-state').addEventListener('change', refreshReport);
 $('#report-type').addEventListener('change', refreshReport);
+$('#report-team-tag').addEventListener('change', (e) => {
+  report.teamTag = e.target.value;
+  refreshReport();
+});
 reportsDialog.addEventListener('click', (e) => {
   if (e.target === reportsDialog || e.target.closest('[data-close]')) reportsDialog.close();
 });
@@ -2571,7 +2953,7 @@ $('#search').addEventListener('input', (e) => {
   render();
 });
 
-for (const key of ['priority', 'type', 'assignee', 'tag', 'due']) {
+for (const key of ['priority', 'type', 'assignee', 'tag', 'due', 'team']) {
   $(`#filter-${key}`).addEventListener('change', (e) => {
     filter[key] = e.target.value;
     render();
@@ -2606,6 +2988,7 @@ $('#menu-list').addEventListener('click', (e) => {
 const menuActions = {
   'add-column': promptAddColumn,
   reports: () => openReports(),
+  'team-tags': () => openTeamTags(),
   async export() {
     try {
       const saved = await saveFile(`taskflow-board-${todayISO()}.json`, JSON.stringify(state, null, 2), 'application/json');
@@ -2625,7 +3008,7 @@ const menuActions = {
       danger: true,
     })) return;
     const before = state;
-    commit(createSampleState());
+    commit({ ...createSampleState(), teamTags: teamTagsOf(state) });
     toast('Sample data loaded', { label: 'Undo', run: () => commit(before) });
   },
   'clear-done': () => {
@@ -2643,7 +3026,8 @@ const menuActions = {
       danger: true,
     })) return;
     const before = state;
-    commit(createEmptyState());
+    // Team tags are the board's setup, not tasks, so they stay.
+    commit({ ...createEmptyState(), teamTags: teamTagsOf(state) });
     toast('Board cleared', { label: 'Undo', run: () => commit(before) });
   },
 };

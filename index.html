@@ -31,6 +31,7 @@
         <button class="btn btn-ghost icon-btn" id="menu-btn" aria-haspopup="true" aria-expanded="false" aria-label="Board menu">⋯</button>
         <div class="menu-list" id="menu-list" role="menu" hidden>
           <button role="menuitem" data-action="reports">Reports…</button>
+          <button role="menuitem" data-action="team-tags">Team tags…</button>
           <button role="menuitem" data-action="add-column">Add column</button>
           <button role="menuitem" data-action="export">Export board (JSON)</button>
           <button role="menuitem" data-action="import">Import board…</button>
@@ -142,6 +143,7 @@
         <option value="service">Service improvement item</option>
         <option value="none">No type</option>
       </select>
+      <select id="filter-team" aria-label="Filter by team" hidden></select>
       <select id="filter-assignee" aria-label="Filter by person"></select>
       <select id="filter-tag" aria-label="Filter by tag"></select>
       <select id="filter-due" aria-label="Filter by due date">
@@ -201,15 +203,15 @@
           <input type="date" name="dueDate">
         </label>
         <div class="field">
-          <span id="assignee-label">Assignee</span>
+          <span id="assignee-label">Assignees</span>
           <div class="assignee-picker">
-            <div class="assignee-chosen" id="assignee-chosen" hidden></div>
+            <ul class="assignee-chosen" id="assignee-chosen" aria-label="Assigned people" hidden></ul>
             <input id="assignee-input" autocomplete="off" maxlength="60" placeholder="Search people…"
               role="combobox" aria-labelledby="assignee-label" aria-autocomplete="list"
               aria-controls="assignee-results" aria-expanded="false">
             <div class="assignee-results" id="assignee-results" role="listbox" hidden></div>
           </div>
-          <button type="button" class="link-btn" id="assign-me" hidden>Assign to me</button>
+          <button type="button" class="link-btn" id="assign-me" hidden>Add me</button>
         </div>
       </div>
       <div class="field-row">
@@ -228,6 +230,10 @@
           </div>
         </fieldset>
       </div>
+      <fieldset class="field team-field">
+        <legend>Teams <small>(pick every team working on it)</small></legend>
+        <div class="team-options" id="team-options"></div>
+      </fieldset>
       <fieldset class="field points-field">
         <legend>Story points</legend>
         <div class="points-options" id="points-options"></div>
@@ -236,6 +242,15 @@
         <span>Tags <small>(comma separated)</small></span>
         <input name="tags" autocomplete="off" placeholder="e.g. frontend, q4">
       </label>
+      <fieldset class="field checklist-field">
+        <legend>Checklist <small id="checklist-progress"></small></legend>
+        <ul class="checklist" id="checklist" aria-label="Checklist items"></ul>
+        <div class="checklist-add">
+          <input id="checklist-input" autocomplete="off" maxlength="200" placeholder="Add a step, e.g. Open firewall port" aria-label="New checklist item">
+          <button type="button" class="btn" id="checklist-add-btn">Add</button>
+        </div>
+        <p class="field-hint">Give each step a team and a person so everyone can see who still has work to do.</p>
+      </fieldset>
       <p class="meta" id="task-meta"></p>
       <footer class="dialog-footer">
         <button type="button" class="btn btn-danger" id="delete-task-btn" hidden>Delete</button>
@@ -360,6 +375,7 @@
             <option value="none">No type</option>
           </select>
         </label>
+        <label class="field" hidden><span>Team tag</span><select id="report-team-tag"></select></label>
       </div>
       <fieldset class="report-include">
         <legend>Include</legend>
@@ -402,6 +418,23 @@
         <h3 id="admin-access-title">Who can do what</h3>
         <ul class="admin-roles" id="admin-roles"></ul>
       </section>
+    </div>
+  </dialog>
+
+  <dialog id="team-tags-dialog" class="team-tags-dialog" aria-labelledby="team-tags-title">
+    <div class="team-tags-body">
+      <header class="dialog-header">
+        <h2 id="team-tags-title">Team tags</h2>
+        <button type="button" class="btn btn-ghost icon-btn" data-close aria-label="Close">✕</button>
+      </header>
+      <p class="ask-message">Tag tasks with the teams working on them. A task can have several teams, and the Team filter shows each team its own work. These tags belong to <strong id="team-tags-board"></strong>.</p>
+      <ul class="team-tag-list" id="team-tag-list" aria-label="Team tags"></ul>
+      <p class="member-empty" id="team-tag-empty">No team tags yet.</p>
+      <form class="team-tag-add" id="team-tag-form">
+        <input id="team-tag-input" autocomplete="off" maxlength="600" placeholder="Team name, e.g. Networks" aria-label="New team tag">
+        <button type="submit" class="btn btn-primary">Add</button>
+      </form>
+      <p class="field-hint">Tip: paste several names separated by commas to add them at once.</p>
     </div>
   </dialog>
 

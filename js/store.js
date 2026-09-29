@@ -62,6 +62,7 @@ export function createEmptyState() {
     version: 1,
     columns: DEFAULT_COLUMNS.map((c) => ({ ...c })),
     sprints: [],
+    teamTags: [],
     tasks: [],
   };
 }
@@ -130,11 +131,45 @@ export function normalizeState(input) {
     .filter((sp) => sp && typeof sp.id === 'string' && sp.id)
     .map(normalizeSprint));
   const sprintIds = new Set(sprints.map((sp) => sp.id));
+  const teamTags = normalizeTeamTags(input.teamTags);
+  const teamIds = new Set(teamTags.map((tt) => tt.id));
   const tasks = input.tasks
     .filter((t) => t && typeof t.title === 'string')
     .map((t) => normalizeTask(t, columnIds.has(t.status) ? t.status : columns[0].id))
-    .map((t) => (sprintIds.has(t.sprintId) ? t : { ...t, sprintId: '' }));
-  return { version: 1, columns, sprints, tasks: reindex(tasks, columns) };
+    .map((t) => (sprintIds.has(t.sprintId) ? t : { ...t, sprintId: '' }))
+    .map((t) => dropUnknownTeams(t, teamIds));
+  return { version: 1, columns, sprints, teamTags, tasks: reindex(tasks, columns) };
+}
+
+// Team tags a board's tasks can carry, e.g. "Networks": [{ id, name, color }].
+// color is an index into the palette of team colours in the UI.
+export const TEAM_TAG_COLORS = 8;
+export const MAX_TEAM_TAGS = 30;
+
+function normalizeTeamTags(input) {
+  const out = [];
+  const names = new Set();
+  for (const tt of Array.isArray(input) ? input : []) {
+    const name = cleanTeamTagName(tt?.name);
+    if (!tt || typeof tt.id !== 'string' || !tt.id || !name || names.has(name.toLowerCase())) continue;
+    if (out.some((o) => o.id === tt.id)) continue;
+    names.add(name.toLowerCase());
+    const color = Number.isInteger(tt.color) && tt.color >= 0 ? tt.color % TEAM_TAG_COLORS : out.length % TEAM_TAG_COLORS;
+    out.push({ id: tt.id, name, color });
+    if (out.length >= MAX_TEAM_TAGS) break;
+  }
+  return out;
+}
+
+export function cleanTeamTagName(name) {
+  return String(name ?? '').replace(/\s+/g, ' ').trim().slice(0, 40);
+}
+
+function dropUnknownTeams(task, teamIds) {
+  const pruneTeam = (id) => (teamIds.has(id) ? id : '');
+  const teams = task.teams.filter((id) => teamIds.has(id));
+  const checklist = task.checklist.map((item) => (item.team && !teamIds.has(item.team) ? { ...item, team: pruneTeam(item.team) } : item));
+  return teams.length === task.teams.length && checklist.every((c, i) => c === task.checklist[i]) ? task : { ...task, teams, checklist };
 }
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
@@ -197,15 +232,80 @@ function normalizeTask(t, status) {
     points: cleanPoints(t.points),
     dueDate: /^\d{4}-\d{2}-\d{2}$/.test(t.dueDate ?? '') ? t.dueDate : '',
     tags: normalizeTags(t.tags),
-    // assigneeId is a person's account id (hosted on claude.ai); assignee
-    // is a free-text name, used when accounts aren't available.
-    assigneeId: String(t.assigneeId ?? '').trim(),
-    assignee: String(t.assignee ?? '').trim(),
+    ...normalizeAssignees(t),
+    // Team tag ids (see teamTags on the board).
+    teams: cleanIdList(t.teams, MAX_TEAM_TAGS),
+    checklist: normalizeChecklist(t.checklist),
     order: Number.isFinite(t.order) ? t.order : 0,
     createdAt: t.createdAt || now,
     updatedAt: t.updatedAt || now,
     completedAt: t.completedAt || null,
   };
+}
+
+// A task can have several assignees. Each is a key: "id:<account id>"
+// (hosted on claude.ai) or "name:<free text>" (when accounts aren't
+// available). assigneeId / assignee mirror the first one, which is how
+// tasks stored a single assignee before.
+export const MAX_ASSIGNEES = 10;
+
+export function personKey(item) {
+  if (!item) return '';
+  if (typeof item === 'string') {
+    const [, kind, value] = /^(id|name):(.*)$/s.exec(item) ?? [];
+    const clean = String(value ?? '').trim();
+    return kind && clean ? `${kind}:${clean}` : '';
+  }
+  if (item.id) return `id:${String(item.id).trim()}`;
+  if (item.name) return `name:${String(item.name).trim()}`;
+  return '';
+}
+
+function normalizeAssignees(t) {
+  const legacy = t.assigneeId ? `id:${String(t.assigneeId).trim()}` : t.assignee ? `name:${String(t.assignee).trim()}` : '';
+  const list = Array.isArray(t.assignees) ? t.assignees : [legacy];
+  const assignees = [...new Set(list.map(personKey).filter(Boolean))].slice(0, MAX_ASSIGNEES);
+  const first = assignees[0] ?? '';
+  return {
+    assignees,
+    assigneeId: first.startsWith('id:') ? first.slice(3) : '',
+    assignee: first.startsWith('name:') ? first.slice(5) : '',
+  };
+}
+
+function cleanIdList(list, max) {
+  return [...new Set((Array.isArray(list) ? list : []).filter((v) => typeof v === 'string' && v))].slice(0, max);
+}
+
+// Checklist items: { id, text, done, team, person } where team is a team
+// tag id and person an assignee key ('' for none).
+export const MAX_CHECKLIST = 50;
+
+function normalizeChecklist(list) {
+  if (!Array.isArray(list)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const item of list) {
+    const text = String(item?.text ?? '').replace(/\s+/g, ' ').trim().slice(0, 200);
+    if (!text) continue;
+    let id = typeof item.id === 'string' && item.id ? item.id : uid('c');
+    if (seen.has(id)) id = uid('c');
+    seen.add(id);
+    out.push({
+      id,
+      text,
+      done: Boolean(item.done),
+      team: typeof item.team === 'string' ? item.team : '',
+      person: personKey(item.person),
+    });
+    if (out.length >= MAX_CHECKLIST) break;
+  }
+  return out;
+}
+
+export function checklistProgress(task) {
+  const total = task.checklist?.length ?? 0;
+  return { done: total ? task.checklist.filter((c) => c.done).length : 0, total };
 }
 
 export function normalizeTags(tags) {
@@ -261,48 +361,100 @@ export function allTags(state) {
   return [...new Set(state.tasks.flatMap((t) => t.tags))].sort();
 }
 
-// One key per assignee: "id:<account id>" or "name:<free text>".
+// Every assignee key of a task: "id:<account id>" or "name:<free text>".
+export function assigneeKeys(task) {
+  if (Array.isArray(task.assignees)) return task.assignees;
+  return normalizeAssignees(task).assignees;
+}
+
+// The first (lead) assignee's key, or ''.
 export function assigneeKey(task) {
-  if (task.assigneeId) return `id:${task.assigneeId}`;
-  if (task.assignee) return `name:${task.assignee}`;
-  return '';
+  return assigneeKeys(task)[0] ?? '';
 }
 
 export function allAssigneeKeys(state) {
-  return [...new Set(state.tasks.map(assigneeKey).filter(Boolean))];
+  return [...new Set(state.tasks.flatMap(assigneeKeys))];
 }
 
 // Open (not done) task counts per assignee key; '' counts unassigned.
+// A task shared by several people counts once for each of them.
 export function workload(state) {
   const counts = new Map();
   for (const t of state.tasks) {
     if (t.status === DONE_COLUMN_ID) continue;
-    const key = assigneeKey(t);
-    counts.set(key, (counts.get(key) ?? 0) + 1);
+    const keys = assigneeKeys(t);
+    for (const key of keys.length ? keys : ['']) counts.set(key, (counts.get(key) ?? 0) + 1);
   }
   return counts;
 }
 
-// filter.assignee: '' (anyone), 'me', 'none', or an assigneeKey.
+// Open (not done) task counts per team tag id; '' counts tasks with no team.
+export function teamWorkload(state) {
+  const counts = new Map();
+  for (const t of state.tasks) {
+    if (t.status === DONE_COLUMN_ID) continue;
+    for (const id of t.teams?.length ? t.teams : ['']) counts.set(id, (counts.get(id) ?? 0) + 1);
+  }
+  return counts;
+}
+
+export function teamTagsOf(state) {
+  return state.teamTags ?? [];
+}
+
+export function addTeamTag(state, name) {
+  const clean = cleanTeamTagName(name);
+  const tags = teamTagsOf(state);
+  if (!clean || tags.length >= MAX_TEAM_TAGS || tags.some((tt) => tt.name.toLowerCase() === clean.toLowerCase())) return state;
+  // The first colour not in use, so neighbouring tags look different.
+  const used = new Set(tags.map((tt) => tt.color));
+  const color = [...Array(TEAM_TAG_COLORS).keys()].find((c) => !used.has(c)) ?? tags.length % TEAM_TAG_COLORS;
+  return { ...state, teamTags: [...tags, { id: uid('g'), name: clean, color }] };
+}
+
+export function renameTeamTag(state, id, name) {
+  const clean = cleanTeamTagName(name);
+  const tags = teamTagsOf(state);
+  if (!clean || tags.some((tt) => tt.id !== id && tt.name.toLowerCase() === clean.toLowerCase())) return state;
+  return { ...state, teamTags: tags.map((tt) => (tt.id === id ? { ...tt, name: clean } : tt)) };
+}
+
+// Removes a team tag from the board, its tasks and their checklists.
+export function deleteTeamTag(state, id) {
+  const teamTags = teamTagsOf(state).filter((tt) => tt.id !== id);
+  return {
+    ...state,
+    teamTags,
+    tasks: state.tasks.map((t) => dropUnknownTeams(t, new Set(teamTags.map((tt) => tt.id)))),
+  };
+}
+
+// filter.assignee: '' (anyone), 'me', 'none', or an assignee key.
+// filter.team: '' (any), 'none', or a team tag id.
 // people.meKeys lists the keys that mean "me"; people.nameOf(task) gives
-// the assignee's display name so search can match it.
+// the assignees' display names so search can match them. people.teamName
+// turns a team tag id into its name, for search.
 export function matchesFilter(task, filter = {}, today = todayISO(), people = {}) {
-  const { query = '', priority = '', type = '', tag = '', assignee = '', due = '' } = filter;
-  const { meKeys = [], nameOf = (t) => t.assignee } = people;
+  const { query = '', priority = '', type = '', tag = '', assignee = '', due = '', team = '' } = filter;
+  const { meKeys = [], nameOf = (t) => assigneeKeys(t).map((k) => k.replace(/^\w+:/, '')).join(' '), teamName = () => '' } = people;
   if (priority && task.priority !== priority) return false;
   if (type === 'none' && task.type) return false;
   if (type && type !== 'none' && task.type !== type) return false;
   if (tag && !task.tags.includes(tag)) return false;
-  const key = assigneeKey(task);
-  if (assignee === 'none' && key) return false;
-  if (assignee === 'me' && !meKeys.includes(key)) return false;
-  if (assignee && assignee !== 'none' && assignee !== 'me' && key !== assignee) return false;
+  const teams = task.teams ?? [];
+  if (team === 'none' && teams.length) return false;
+  if (team && team !== 'none' && !teams.includes(team)) return false;
+  const keys = assigneeKeys(task);
+  if (assignee === 'none' && keys.length) return false;
+  if (assignee === 'me' && !keys.some((k) => meKeys.includes(k))) return false;
+  if (assignee && assignee !== 'none' && assignee !== 'me' && !keys.includes(assignee)) return false;
   if (due === 'overdue' && !isOverdue(task, today)) return false;
   if (due === 'soon' && !isDueSoon(task, today)) return false;
   if (due === 'none' && task.dueDate) return false;
   const q = query.trim().toLowerCase();
   if (q) {
-    const haystack = [task.title, task.description, nameOf(task), TASK_TYPE_LABELS[task.type] ?? '', ...task.tags]
+    const haystack = [task.title, task.description, nameOf(task), TASK_TYPE_LABELS[task.type] ?? '', ...task.tags,
+      ...teams.map(teamName), ...(task.checklist ?? []).map((c) => c.text)]
       .join(' ').toLowerCase();
     if (!haystack.includes(q)) return false;
   }
